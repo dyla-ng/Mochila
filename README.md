@@ -27,7 +27,7 @@ Load Wikipedia, Hacker News, forums, blogs, and tons of other modern sites on ac
 - Encodes images as native PICT format (with mask compositing for icon fonts)
 - Streams primitives over WebSocket using an incredibly lightweight binary wire protocol
 
-**Client** (Mac OS 9.2.2 Carbon):
+**Client** (Mac OS 9 with Carbon API):
 - Receives primitives via OpenTransport
 - Renders natively with QuickDraw
 - Double-buffered offscreen GWorld
@@ -58,6 +58,20 @@ The server will start on `ws://0.0.0.0:8080` and load `https://en.wikipedia.org`
 2. Build and run the Carbon app
 3. It will connect to your server's IP address (Specified in `client-macos9/src/main_carbon.cpp` for now)
 4. Watch modern web pages render in QuickDraw
+
+---
+
+## System Requirements
+
+### Server
+- Node.js 18+
+- Chromium installed (however Playwright should install a compatible version)
+- Sufficient CPU/RAM to run Chromium in the background
+
+### Client
+- Mac OS 9 with Carbon API (9.2.2 is recommended and tested, however, you might get away with 9.1)
+- 16MB-ish of free RAM (This is a guess. In my testing, I couldn't get the client to eat more than 16MB)
+- Tested with a 500MHz iBook G3 with 256MB of RAM installed. YMMV.
 
 ---
 
@@ -128,9 +142,9 @@ Browsers like [MacSurf](https://github.com/mplsllc/macsurf) run all JS, CSS, and
 ### By Design
 
 - **No client-side JavaScript** - All interaction is server-driven. This matches the security model and capabilities of the era.
-- **Image downscaling** - Photos limited to smaller dimensions. Hardware from 2000 can't handle modern high-res images.
+- **Image downscaling** - Photos limited to smaller dimensions. In the future I plan to increase image quality; this feature is just low on the priority list right now.
 - **Single client per server** - Each client needs its own Chromium instance.
-- **Server-driven interaction** - Clicks/scrolls round-trip to server. Expect latency.
+- **Server-driven interaction** - Clicks/scrolls round-trip to server. Expect latency. 
 
 ### Known Issues
 
@@ -148,7 +162,9 @@ Browsers like [MacSurf](https://github.com/mplsllc/macsurf) run all JS, CSS, and
 
 ## Expected Experience
 
-Think early-mid 2000s mobile/constrained-device browsing (remember Opera Mini?) rather than full-fledged desktop browsing.
+Think early-mid 2000s mobile/constrained-device browsing (remember Opera Mini?) rather than full-fledged desktop browsing. 
+
+Even pages that don't render perfectly are often still serviceable. Pixel-perfect reproduction is not the goal. Where other browsers might fail entirely, Mochila will often provide a useful, if imperfect, rendering. It's a tool for using the web as-is, not for recreating the web of the past. 
 
 **Best for:**
 - Reading articles (Wikipedia, news sites, blogs)
