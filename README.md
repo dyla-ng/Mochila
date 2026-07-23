@@ -13,55 +13,6 @@
 ---
 Mochila lets Mac OS 9 machines browse modern websites. Rather than streaming pixels or running a bloated browser on-device, it extracts drawing primitives from Chromium's layout engine and streams those to a native QuickDraw client. Sub-second page loads, and interactivity that is actually snappy!
 
-## How it works
-
-```mermaid
-flowchart TB
-    subgraph Client["Mac OS 9 Client (Carbon + QuickDraw)"]
-        A1[Launch app] --> A2{Preferences<br/>exist?}
-        A2 -->|No| A3[Prompt for<br/>server config]
-        A2 -->|Yes| A4[Load saved<br/>preferences]
-        A3 --> A5[Save to<br/>Preferences file]
-        A4 --> A6[Connect to server]
-        A5 --> A6
-        A6 -->|Send Init| A7[Send viewport<br/>dimensions]
-    end
-
-    subgraph Server["Server (Node.js + Playwright)"]
-        B1[Receive Init +<br/>viewport size] --> B2[Launch Chromium<br/>at client dimensions]
-        B2 --> B3[Capture DOM with DOMSnapshot]
-        B3 --> B4[Extract positions,<br/>styles, text]
-        B4 --> B5[Substitute fonts<br/>Geneva/Monaco/Chicago]
-        B5 --> B6[Calculate widths using<br/>Mac OS 9 metrics]
-        B6 --> B7[Encode images<br/>to PICT format]
-        B7 --> B8[Serialize to<br/>binary primitives]
-    end
-
-    subgraph Network["WebSocket / Binary Protocol"]
-        B8 -->|"DrawText, DrawRect,<br/>DrawImage primitives<br/>+ scroll metadata<br/>~1KB per frame"| C1[Send frame]
-        C2[Receive events] -->|"Clicks, scrolls,<br/>resizes, navigation"| B3
-    end
-
-    subgraph Rendering["Client Rendering & Interaction"]
-        C1 --> D1[Deserialize<br/>primitives]
-        D1 --> D2[Update scrollbars<br/>with doc size]
-        D2 --> D3[Render to offscreen<br/>GWorld buffer]
-        D3 --> D4[Copy to window<br/>via QuickDraw]
-        D4 --> D5[User interactions:<br/>clicks, scrolls,<br/>window resize]
-        D5 --> C2
-        D5 -->|Window resized| D6[Reallocate GWorld<br/>+ send new primitives]
-        D6 --> C2
-    end
-
-    A7 --> B1
-    C2 --> B1
-
-    style Server fill:#e1f5ff
-    style Client fill:#fff5e1
-    style Network fill:#f0f0f0
-    style Rendering fill:#fff5e1
-```
-
 
 
 ## Getting Started
@@ -123,6 +74,55 @@ pixels at every scroll position, limiting the effectiveness of Tight-based diffi
 - **Tiny bandwidth:** Usually less than 10KB per frame after initial load vs. 1MB+ for pixel-based diffs.
 - **Fast rendering:** QuickDraw is FAST. Even a low-end G3 can render thousands of primitives in a few hundred milliseconds, and usually a full page is only a few hundred.
 - **No client-side compute:** The client just draws. Browsers like [MacSurf](https://github.com/mplsllc/macsurf) run all JS, CSS, and layout logic on device. This is too much to ask of these old machines.
+
+<details>
+<summary><b>How it works</b></summary>
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│ Mac OS 9 Client (Carbon + QuickDraw)                                │
+├─────────────────────────────────────────────────────────────────────┤
+│ 1. Launch → Check preferences                                       │
+│    ├─ If missing: Prompt for server config → Save preferences       │
+│    └─ If exists: Load saved preferences                             │
+│ 2. Connect to server                                                │
+│ 3. Send Init + viewport dimensions                                  │
+└─────────────────────────────────────────────────────────────────────┘
+                             ↓
+┌─────────────────────────────────────────────────────────────────────┐
+│ Server (Node.js + Playwright)                                       │
+├─────────────────────────────────────────────────────────────────────┤
+│ 1. Receive Init + viewport size                                     │
+│ 2. Launch Chromium at client dimensions                             │
+│ 3. Capture DOM with DOMSnapshot                                     │
+│ 4. Extract positions, styles, text                                  │
+│ 5. Substitute fonts (Geneva/Monaco/Chicago)                         │
+│ 6. Calculate widths using Mac OS 9 metrics                          │
+│ 7. Encode images to PICT format                                     │
+│ 8. Serialize to binary primitives                                   │
+└─────────────────────────────────────────────────────────────────────┘
+                             ↓
+┌─────────────────────────────────────────────────────────────────────┐
+│ WebSocket / Binary Protocol                                         │
+├─────────────────────────────────────────────────────────────────────┤
+│ → Server sends: DrawText, DrawRect, DrawImage primitives            │
+│                 + scroll metadata (~1KB per frame)                  │
+│ ← Client sends: Clicks, scrolls, resizes, navigation                │
+└─────────────────────────────────────────────────────────────────────┘
+                             ↓
+┌─────────────────────────────────────────────────────────────────────┐
+│ Client Rendering & Interaction                                      │
+├─────────────────────────────────────────────────────────────────────┤
+│ 1. Deserialize primitives                                           │
+│ 2. Update scrollbars with doc size                                  │
+│ 3. Render to offscreen GWorld buffer                                │
+│ 4. Copy to window via QuickDraw                                     │
+│ 5. User interactions → Send events back to server                   │
+│    └─ Window resize: Reallocate GWorld + request new render         │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+</details>
 
 
 ## What Works
