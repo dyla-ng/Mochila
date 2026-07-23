@@ -47,7 +47,7 @@ export interface MacOS9Font {
 
 /**
  * Mac OS 9 System Font Table
- * REAL METRICS extracted from original Apple bitmap fonts (1984-1985)
+ * REAL METRICS extracted from original Apple bitmap fonts
  * Source: Macintosh Garden "Early Apple Fonts" archive
  * Extracted via fondu → BDF format
  *

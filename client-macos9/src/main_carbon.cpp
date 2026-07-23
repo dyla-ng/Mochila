@@ -2,6 +2,7 @@
 #include "primitive_store.h"
 #include "renderer_quickdraw.h"
 #include "wire_protocol.h"
+#include "preferences.h"
 
 #include <iostream>
 #include <stdio.h>
@@ -27,10 +28,26 @@ int main(int argc, char *argv[]) {
   // Initialize Mac OS 9 Cursor
   InitCursor();
 
-  std::string host = "10.141.28.14"; // Host Mac IP address
-  int port = 8080;
-  std::string targetUrl =
-      "https://en.wikipedia.org/wiki/History_of_the_Internet";
+  // Load preferences (or prompt for configuration on first launch)
+  MochilaPreferences prefs;
+
+  if (!PreferencesManager::load(prefs)) {
+    std::cout << "[Mochila] No saved preferences found" << std::endl;
+
+    // Show configuration dialog
+    if (!PreferencesManager::showConfigDialog(prefs)) {
+      std::cerr << "[Mochila] Configuration cancelled, exiting" << std::endl;
+      return 1;
+    }
+
+    // Save preferences for next time
+    PreferencesManager::save(prefs);
+  }
+
+  // Command-line arguments can override saved preferences
+  std::string host = prefs.serverHost;
+  int port = prefs.serverPort;
+  std::string targetUrl = prefs.lastUrl;
 
   if (argc > 1)
     host = argv[1];
@@ -39,15 +56,36 @@ int main(int argc, char *argv[]) {
   if (argc > 3)
     targetUrl = argv[3];
 
+  // Calculate initial window size based on screen resolution (85% of screen)
+  BitMap screenBits;
+  GetQDGlobalsScreenBits(&screenBits);
+  Rect screenRect = screenBits.bounds;
+
+  int screenWidth = screenRect.right - screenRect.left;
+  int screenHeight = screenRect.bottom - screenRect.top;
+
+  // Use 85% of screen size, with sensible min/max bounds
+  int initialWidth = static_cast<int>(screenWidth * 0.85);
+  int initialHeight = static_cast<int>((screenHeight - 40) * 0.85); // -40 for menu bar
+
+  // Clamp to reasonable bounds
+  if (initialWidth < 800) initialWidth = 800;
+  if (initialWidth > 1600) initialWidth = 1600;
+  if (initialHeight < 600) initialHeight = 600;
+  if (initialHeight > 1200) initialHeight = 1200;
+
+  std::cout << "[Mac OS 9] Screen: " << screenWidth << "x" << screenHeight
+            << ", Window: " << initialWidth << "x" << initialHeight << " (85%)" << std::endl;
+
   // Create & Show Window FIRST so the user sees the Carbon UI immediately
-  QuickDrawRenderer renderer(1024, 768, "Mochila v2 - Mac OS 9.2.2");
+  QuickDrawRenderer renderer(initialWidth, initialHeight, "Mochila");
   if (!renderer.isValid()) {
     std::cerr << "[Mac OS 9] QuickDraw initialization failed!" << std::endl;
     return 1;
   }
 
-  renderer.drawRect(0, 0, 1024, 768, Color(240, 240, 245, 255));
-  renderer.drawText(50, 50, "Mochila v2 - Connecting to server...", 3, 18,
+  renderer.drawRect(0, 0, renderer.getWidth(), renderer.getHeight(), Color(240, 240, 245, 255));
+  renderer.drawText(50, 50, "Mochila - Connecting to server...", 3, 18,
                     Color(30, 30, 30, 255), true, false, false);
   renderer.copyGWorldToWindow();
 
@@ -65,13 +103,25 @@ int main(int argc, char *argv[]) {
         14, Color(200, 0, 0, 255), false, false, false);
     renderer.copyGWorldToWindow();
   } else {
-    // Send binary Init request (MessageType 3) with Little-Endian urlLen
+    // Send binary Init request (MessageType 3) with viewport dimensions
+    // Format: [type][urlLen:2][url...][width:2][height:2]
     uint16_t urlLen = static_cast<uint16_t>(targetUrl.length());
-    std::vector<uint8_t> initMsg(1 + 2 + urlLen);
+    std::vector<uint8_t> initMsg(1 + 2 + urlLen + 2 + 2);
     initMsg[0] = 3;                    // MessageType = 3 (Init)
     initMsg[1] = urlLen & 0xFF;        // Little-Endian low byte
     initMsg[2] = (urlLen >> 8) & 0xFF; // Little-Endian high byte
     memcpy(&initMsg[3], targetUrl.data(), urlLen);
+
+    // Append viewport dimensions
+    uint16_t viewportWidth = static_cast<uint16_t>(renderer.getWidth());
+    uint16_t viewportHeight = static_cast<uint16_t>(renderer.getHeight());
+    size_t offset = 3 + urlLen;
+    initMsg[offset] = viewportWidth & 0xFF;
+    initMsg[offset + 1] = (viewportWidth >> 8) & 0xFF;
+    initMsg[offset + 2] = viewportHeight & 0xFF;
+    initMsg[offset + 3] = (viewportHeight >> 8) & 0xFF;
+
+    std::cout << "[Mac OS 9] Sending Init with viewport: " << viewportWidth << "x" << viewportHeight << std::endl;
     ws.sendBinary(initMsg);
   }
 
@@ -93,7 +143,7 @@ int main(int argc, char *argv[]) {
   // Non-blocking Classic Mac Event & Network Loop
   while (!shouldQuit) {
     EventRecord event;
-    // Sleep 1 tick (16.6ms) during idle states so Mac OS 9 can sleep CPU
+    // Sleep 1 tick (~16ms) to allow network I/O polling without burning CPU
     if (WaitNextEvent(everyEvent, &event, 1, nil)) {
       switch (event.what) {
       case mouseDown: {
@@ -104,7 +154,32 @@ int main(int argc, char *argv[]) {
           Point localPt = event.where;
           GlobalToLocal(&localPt);
 
-          if (localPt.v < QuickDrawRenderer::ADDRESS_BAR_HEIGHT) {
+          // Check if click is in a scrollbar control
+          ControlRef hitControl;
+          short controlPart = FindControl(localPt, hitWin, &hitControl);
+          if (controlPart != 0 && hitControl != NULL) {
+            // Handle scrollbar tracking
+            short trackResult = TrackControl(hitControl, localPt, NULL);
+            if (trackResult != 0) {
+              // Get new scrollbar value
+              int newValue = GetControlValue(hitControl);
+
+              // Determine which scrollbar was clicked
+              if (hitControl == renderer.getVerticalScrollBar()) {
+                renderer.setScrollY(newValue);
+                scrollPending = true;
+                pendingScrollY = newValue;
+                scrollStoppedTicks = TickCount();
+                renderer.renderFrame(store);  // Re-render with new scroll position
+              } else if (hitControl == renderer.getHorizontalScrollBar()) {
+                renderer.setScrollX(newValue);
+                scrollPending = true;
+                pendingScrollY = renderer.getScrollY();  // Keep Y unchanged
+                scrollStoppedTicks = TickCount();
+                renderer.renderFrame(store);  // Re-render with new scroll position
+              }
+            }
+          } else if (localPt.v < QuickDrawRenderer::ADDRESS_BAR_HEIGHT) {
             if (localPt.h >= 8 && localPt.h <= 38) { // Back [<]
               if (ws.isConnected()) {
                 std::vector<uint8_t> navMsg =
@@ -144,6 +219,51 @@ int main(int argc, char *argv[]) {
           BitMap screenBits;
           GetQDGlobalsScreenBits(&screenBits);
           DragWindow(hitWin, event.where, &screenBits.bounds);
+        } else if (part == inGrow) {
+          // Handle window resize via grow box (resize handle)
+          Rect sizeRect;
+          sizeRect.top = 480;     // Minimum height (640x480)
+          sizeRect.left = 640;    // Minimum width
+          sizeRect.bottom = 1200; // Maximum height (1600x1200)
+          sizeRect.right = 1600;  // Maximum width
+
+          long growResult = GrowWindow(hitWin, event.where, &sizeRect);
+          if (growResult != 0) {
+            short newWidth = LoWord(growResult);
+            short newHeight = HiWord(growResult);
+
+            std::cout << "[Mac OS 9] User resized window via grow box to "
+                      << newWidth << "x" << newHeight << std::endl;
+
+            // Resize the actual window
+            SizeWindow(hitWin, newWidth, newHeight, true);
+
+            // updateEvt will fire automatically and handle the rest
+            // (GWorld reallocation, server notification, etc.)
+          }
+        } else if (part == inZoomIn || part == inZoomOut) {
+          // Handle zoom box (maximize/restore button)
+          if (TrackBox(hitWin, event.where, part)) {
+            // Get screen dimensions for maximize
+            BitMap screenBits;
+            GetQDGlobalsScreenBits(&screenBits);
+            Rect screenRect = screenBits.bounds;
+
+            if (part == inZoomIn) {
+              // Maximize: use full screen minus menu bar and some margin
+              short maxWidth = screenRect.right - screenRect.left - 10;
+              short maxHeight = screenRect.bottom - screenRect.top - 40; // Leave room for menu bar
+
+              std::cout << "[Mac OS 9] Zooming in (maximize) to " << maxWidth << "x" << maxHeight << std::endl;
+              ZoomWindow(hitWin, part, false);
+            } else {
+              // Restore to standard size
+              std::cout << "[Mac OS 9] Zooming out (restore)" << std::endl;
+              ZoomWindow(hitWin, part, false);
+            }
+
+            // updateEvt will fire and handle GWorld reallocation
+          }
         } else if (part == inGoAway) {
           if (TrackGoAway(hitWin, event.where)) {
             shouldQuit = true;
@@ -199,14 +319,25 @@ int main(int argc, char *argv[]) {
               store.clear();
               renderer.setScrollY(0);
 
-              std::vector<uint8_t> initMsg(1 + 2 + typedUrl.length());
+              // Send Init with viewport dimensions (same format as initial load)
+              uint16_t urlLen = static_cast<uint16_t>(typedUrl.length());
+              std::vector<uint8_t> initMsg(1 + 2 + urlLen + 2 + 2);
               initMsg[0] = 3; // MessageType 3 (Init)
-              uint16_t urlLen = typedUrl.length();
               initMsg[1] = urlLen & 0xFF;
               initMsg[2] = (urlLen >> 8) & 0xFF;
               memcpy(&initMsg[3], typedUrl.data(), urlLen);
+
+              // Append viewport dimensions
+              uint16_t viewportWidth = static_cast<uint16_t>(renderer.getWidth());
+              uint16_t viewportHeight = static_cast<uint16_t>(renderer.getHeight());
+              size_t offset = 3 + urlLen;
+              initMsg[offset] = viewportWidth & 0xFF;
+              initMsg[offset + 1] = (viewportWidth >> 8) & 0xFF;
+              initMsg[offset + 2] = viewportHeight & 0xFF;
+              initMsg[offset + 3] = (viewportHeight >> 8) & 0xFF;
+
               std::cout << "[Mac OS 9] Navigating to: " << typedUrl
-                        << std::endl;
+                        << " (viewport: " << viewportWidth << "x" << viewportHeight << ")" << std::endl;
               ws.sendBinary(initMsg);
             }
           } else if (charCode == 0x08 ||
@@ -236,6 +367,22 @@ int main(int argc, char *argv[]) {
           scrollPending = true;
           pendingScrollY = newScroll;
           scrollStoppedTicks = TickCount();
+        } else if (!isCmdPressed && keyCode == 0x7B) { // Left Arrow (horizontal scroll left)
+          int newScrollX = renderer.getScrollX() - 60;
+          if (newScrollX < 0)
+            newScrollX = 0;
+          renderer.setScrollX(newScrollX);
+          renderer.renderFrame(store); // Full re-render for horizontal scroll
+          scrollPending = true;
+          pendingScrollY = renderer.getScrollY(); // Keep Y unchanged
+          scrollStoppedTicks = TickCount();
+        } else if (!isCmdPressed && keyCode == 0x7C) { // Right Arrow (horizontal scroll right)
+          int newScrollX = renderer.getScrollX() + 60;
+          renderer.setScrollX(newScrollX);
+          renderer.renderFrame(store); // Full re-render for horizontal scroll
+          scrollPending = true;
+          pendingScrollY = renderer.getScrollY(); // Keep Y unchanged
+          scrollStoppedTicks = TickCount();
         } else {
           char c = charCode;
           std::string textStr(1, c);
@@ -250,6 +397,32 @@ int main(int argc, char *argv[]) {
       case updateEvt: {
         WindowRef updateWin = (WindowRef)event.message;
         if (updateWin == renderer.getWindow()) {
+          // Check if window was resized
+          Rect portRect;
+          GetPortBounds(GetWindowPort(updateWin), &portRect);
+          int currentWidth = portRect.right - portRect.left;
+          int currentHeight = portRect.bottom - portRect.top;
+
+          if (currentWidth != renderer.getWidth() || currentHeight != renderer.getHeight()) {
+            std::cout << "[Mac OS 9] Window resized to " << currentWidth << "x" << currentHeight << std::endl;
+
+            // Handle the resize (reallocate GWorld, reposition scrollbars)
+            if (renderer.handleResize(currentWidth, currentHeight)) {
+              // Send resize message to server
+              if (ws.isConnected()) {
+                std::vector<uint8_t> resizeMsg = WireProtocol::serializeResizeViewport(
+                  static_cast<uint16_t>(currentWidth),
+                  static_cast<uint16_t>(currentHeight)
+                );
+                ws.sendBinary(resizeMsg);
+                std::cout << "[Mac OS 9] Sent ResizeViewport: " << currentWidth << "x" << currentHeight << std::endl;
+              }
+
+              // Re-render with new dimensions
+              renderer.renderFrame(store);
+            }
+          }
+
           BeginUpdate(updateWin);
           renderer.copyGWorldToWindow(); // Instant GWorld blit for uncovered
                                          // update region
@@ -266,23 +439,29 @@ int main(int argc, char *argv[]) {
       if (ws.isConnected()) {
         localScrollSeq++; // Increment sequence number for each scroll event
         std::vector<uint8_t> scrollMsg =
-            WireProtocol::serializeScroll(pendingScrollY, localScrollSeq);
+            WireProtocol::serializeScroll(renderer.getScrollX(), pendingScrollY, localScrollSeq);
         ws.sendBinary(scrollMsg);
         std::cout << "[Mac OS 9] Sent scroll seq=" << localScrollSeq
-                  << " scrollY=" << pendingScrollY << "px" << std::endl;
+                  << " scroll=(" << renderer.getScrollX() << "," << pendingScrollY << ")px" << std::endl;
       }
       scrollPending = false;
     }
 
-    // Poll OpenTransport TCP socket for incoming binary FrameUpdates
+    // Poll OpenTransport TCP socket for incoming messages
+    // IMPORTANT: Drain all pending messages in a loop (server sends multiple ImageData messages)
     if (ws.isConnected()) {
       std::vector<uint8_t> packetData;
-      if (ws.pollData(packetData)) {
-        FrameUpdate update = WireProtocol::parseFrameUpdate(packetData);
+      while (ws.pollData(packetData)) {
+        // Peek at message type to determine how to parse
+        uint8_t msgType = WireProtocol::peekMessageType(packetData);
 
-        // DEBUG: Log received primitives
-        std::cout << "[DEBUG] FrameUpdate #" << update.frameId << " received "
-                  << update.primitives.size() << " primitives" << std::endl;
+        if (msgType == 1) {
+          // FrameUpdate message
+          FrameUpdate update = WireProtocol::parseFrameUpdate(packetData);
+
+          // DEBUG: Log received primitives
+          std::cout << "[DEBUG] FrameUpdate #" << update.frameId << " received "
+                    << update.primitives.size() << " primitives" << std::endl;
 
         store.applyFrameUpdate(update);
 
@@ -310,20 +489,30 @@ int main(int argc, char *argv[]) {
             update.lastProcessedScrollSeq >= localScrollSeq) {
           // Server has processed all our scrolls, trust server position
           renderer.setScrollY(update.scrollY);
-          std::cout << "[Mac OS 9] Applied server scrollY=" << update.scrollY
+          renderer.setScrollX(update.scrollX);
+          std::cout << "[Mac OS 9] Applied server scroll=(" << update.scrollX << "," << update.scrollY << ")"
                     << " (server processed seq="
                     << update.lastProcessedScrollSeq << ")" << std::endl;
         } else if (!update.hasLastProcessedScrollSeq && !scrollPending) {
           // Old server without sequence numbers, fall back to scrollPending
           // check
           renderer.setScrollY(update.scrollY);
+          renderer.setScrollX(update.scrollX);
         } else {
           // Server hasn't processed our latest scroll yet, keep local position
-          std::cout << "[Mac OS 9] Ignoring server scrollY (local prediction "
+          std::cout << "[Mac OS 9] Ignoring server scroll (local prediction "
                        "newer, localSeq="
                     << localScrollSeq
                     << " serverSeq=" << update.lastProcessedScrollSeq << ")"
                     << std::endl;
+        }
+
+        // Update scrollbar ranges with document size (if metadata present)
+        if (update.hasScrollMetadata) {
+          renderer.updateScrollBarsWithDocumentSize(
+            update.documentWidth, update.documentHeight,
+            update.viewportWidth, update.viewportHeight
+          );
         }
 
         // Send FrameAck (MessageType 2)
@@ -333,13 +522,40 @@ int main(int argc, char *argv[]) {
         std::vector<uint8_t> ackBytes = WireProtocol::serializeFrameAck(ack);
         ws.sendBinary(ackBytes);
 
-        // DIFFERENTIAL RENDERING: Only draw what changed!
-        // On FIRST frame, use renderFrame() (clears screen, no white erase
-        // rects) On subsequent frames, use renderDiff() for 10-100x speedup
-        if (update.frameId == 1 || store.size() == 0) {
+          // Render the frame (full redraw is fast on QuickDraw!)
+          // Viewport culling prevents off-screen image decoding that would freeze UI
           renderer.renderFrame(store);
+        } else if (msgType == 12) {
+          // ImageData message
+          ImageData imgData = WireProtocol::parseImageData(packetData);
+
+          std::cout << "[Mac OS 9] Received ImageData: " << imgData.imageId
+                    << " (" << imgData.pictBytes.size() << " bytes)" << std::endl;
+
+          // Find ALL matching DrawImage primitives and populate pictBytes
+          // (same image may appear multiple times on page)
+          const std::vector<PrimitivePtr> &prims = store.getPrimitives();
+          int populatedCount = 0;
+          for (size_t i = 0; i < prims.size(); i++) {
+            if (prims[i]->type == PrimitiveType_DrawImage) {
+              DrawImagePrimitive *img = (DrawImagePrimitive *)prims[i];
+              if (img->imageId == imgData.imageId && img->pictBytes.empty()) {
+                img->pictBytes = imgData.pictBytes;
+                populatedCount++;
+                std::cout << "[Mac OS 9] Populated image " << imgData.imageId
+                          << " at (" << img->x << "," << img->y << ")" << std::endl;
+              }
+            }
+          }
+
+          // Re-render if we populated any images
+          if (populatedCount > 0) {
+            std::cout << "[Mac OS 9] Populated " << populatedCount
+                      << " instances of image " << imgData.imageId << ", re-rendering" << std::endl;
+            renderer.renderFrame(store);
+          }
         } else {
-          renderer.renderDiff(update, store);
+          std::cerr << "[Mac OS 9] Unknown message type: " << (int)msgType << std::endl;
         }
       }
     }

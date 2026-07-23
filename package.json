@@ -4,6 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "start": "tsx src/server-live.ts",
+    "dev": "tsx src/server-live.ts",
     "dom-walk": "tsx src/dom-walk.ts",
     "tracing": "tsx src/tracing.ts",
     "compare": "tsx src/compare.ts"

@@ -1,13 +1,6 @@
 /**
  * Change Detection for Primitive Trees
  *
- * Per handoff spec Section 5: this is a NEW problem, not a port of v1's
- * tile-hashing/CopyRect logic. We use DOM-based identity, not pixel comparison.
- *
- * Key principles:
- * - Identity based on content+type+position hash (not CDP node IDs - see CDP-NODE-ID-DECISION.md)
- * - Diff primitives by identity to find: added, removed, changed
- * - Scrolling should be cheap: just y-coordinate changes
  */
 
 import * as crypto from 'crypto';
@@ -18,6 +11,7 @@ import {
   DrawTextPrimitive,
   DrawImagePrimitive,
   DrawBorderPrimitive,
+  DrawMaskedImagePrimitive,
 } from './types';
 
 export type PrimitiveWithIdentity = Primitive & {
@@ -85,6 +79,15 @@ export function generatePrimitiveIdentity(primitive: Primitive): string {
       parts.push(`x:${p.x}`);  // Include x: same image at different columns = different identities
       parts.push(`w:${p.width}`);
       parts.push(`h:${p.height}`);
+      break;
+    }
+    case PrimitiveType.DrawMaskedImage: {
+      const p = primitive as DrawMaskedImagePrimitive;
+      parts.push(`src:${p.src || 'inline'}`);
+      parts.push(`x:${p.x}`);  // Include x: same mask at different columns = different identities
+      parts.push(`w:${p.width}`);
+      parts.push(`h:${p.height}`);
+      parts.push(`color:${p.fillColor.r},${p.fillColor.g},${p.fillColor.b},${p.fillColor.a}`);
       break;
     }
     case PrimitiveType.DrawBorder: {
@@ -173,6 +176,19 @@ export function primitiveChanged(old: PrimitiveWithIdentity, current: PrimitiveW
              oldP.height !== curP.height ||
              oldBytesLen !== curBytesLen ||
              (!!oldP.pictBytes && !!curP.pictBytes && !oldP.pictBytes.equals(curP.pictBytes));
+    }
+
+    case PrimitiveType.DrawMaskedImage: {
+      const oldP = old as DrawMaskedImagePrimitive;
+      const curP = current as DrawMaskedImagePrimitive;
+      const oldMaskLen = oldP.maskData ? oldP.maskData.length : 0;
+      const curMaskLen = curP.maskData ? curP.maskData.length : 0;
+      return oldP.src !== curP.src ||
+             oldP.width !== curP.width ||
+             oldP.height !== curP.height ||
+             !colorsEqual(oldP.fillColor, curP.fillColor) ||
+             oldMaskLen !== curMaskLen ||
+             (!!oldP.maskData && !!curP.maskData && !oldP.maskData.equals(curP.maskData));
     }
 
     case PrimitiveType.DrawBorder: {

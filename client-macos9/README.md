@@ -10,6 +10,7 @@ Classic Mac OS Carbon/QuickDraw client for Mochila, designed to compile under Co
 - `ot_websocket.cpp` - OpenTransport TCP socket client with WebSocket framing
 - `wire_protocol.cpp` - Binary wire protocol parser
 - `primitive_store.cpp` - Primitive state manager
+- `preferences.cpp` - Simple preferences system
 
 **include/**
 - `renderer_quickdraw.h`
@@ -17,14 +18,15 @@ Classic Mac OS Carbon/QuickDraw client for Mochila, designed to compile under Co
 - `wire_protocol.h`
 - `primitive_store.h`
 - `types.h`
+- `preferences.h`
 
-## Building with CodeWarrior Pro 7/8
+## Building with CodeWarrior Pro 8
 
 ### 1. Create a New Project
 
 1. Open CodeWarrior IDE on your Mac OS 9.2.2 machine
 2. Go to **File -> New Project...**
-3. Select **Mac OS C++ -> Carbon C++ App**
+3. Select **Empty Project**
 4. Name the project `MochilaCarbon.mcp` and save it to the `client-macos9` folder 
 
 ### 2. Add Source Files
@@ -51,7 +53,7 @@ Press `Cmd+Shift+K` to open Target Settings:
 - File Name: `MochilaCarbonApp.out`
 - Creator: `DYLA`
 - Type: `APPL`
-- Preferred Heap Size (k): `16384`
+- Preferred Heap Size (k): `16384` (adjust as needed; if your machine can handle a larger heap, you can increase this. 64MB is a good target for G3/G4 machines.)
 - Minimum Heap Size (k): `8192`
 - Stack Size (k): `256`
 - Enable 'SIZE' Flags checkbox
@@ -86,7 +88,7 @@ The client will connect to your server's IP address on port 8080.
 
 Make sure the server is running first:
 ```bash
-node dist/src/server-live.js
+npm start
 ```
 
 The client will connect to `ws://<your-server-ip>:8080` and start rendering web pages natively with QuickDraw.
@@ -95,4 +97,4 @@ The client will connect to `ws://<your-server-ip>:8080` and start rendering web 
 
 - Mac OS 9.2.2 (For development I used 9.2.2 in a VM with UTM)
 - CodeWarrior Pro 8 updated to 8.3
-- PowerPC G3/G4 recommended
+- PowerPC G3/G4 or equivalent recommended

@@ -2,62 +2,93 @@
 
 # Mochila
 
-### Modern-ish and bangin' fast web browsing for classic Mac OS 9
+### Browse today's web on yesterday's Mac
 
-![Mochila running on Mac OS 9](screenshot.png)
+<img src="screenshot.png" alt="Mochila running on Mac OS 9" width="800">
 
-*Browse Wikipedia, Hacker News, and simple modern sites on 25-year-old hardware*
+*Browse and interact with modern web sites on your classic Mac at light speed!*
 
 </div>
 
 ---
-
-## What is this?
-
-Mochila lets you browse modern websites on Mac OS 9-based machines (e.g. G3/G4-class PowerBooks, iMacs)! Instead of shipping pixels over the network, which would be slow and bandwidth intensive, it streams native drawing primitives extracted from Chromium's layout engine to a native QuickDraw client.
-
-Load Wikipedia, Hacker News, forums, blogs, and tons of other modern sites on actual 25-year-old hardware.
+Mochila lets Mac OS 9 machines browse modern websites. Rather than streaming pixels or running a bloated browser on-device, it extracts drawing primitives from Chromium's layout engine and streams those to a native QuickDraw client. Sub-second page loads, and interactivity that is actually snappy!
 
 ## How it works
 
-**Server** (Node.js & Playwright):
-- Opens pages in headless Chromium
-- Walks the DOM to extract drawing primitives
-- Substitutes fonts using authentic Mac OS 9 bitmap metrics (including Geneva, Monaco, and Chicago)
-- Encodes images as native PICT format (with mask compositing for icon fonts)
-- Streams primitives over WebSocket using an incredibly lightweight binary wire protocol
+```mermaid
+flowchart TB
+    subgraph Client["Mac OS 9 Client (Carbon + QuickDraw)"]
+        A1[Launch app] --> A2{Preferences<br/>exist?}
+        A2 -->|No| A3[Prompt for<br/>server config]
+        A2 -->|Yes| A4[Load saved<br/>preferences]
+        A3 --> A5[Save to<br/>Preferences file]
+        A4 --> A6[Connect to server]
+        A5 --> A6
+        A6 -->|Send Init| A7[Send viewport<br/>dimensions]
+    end
 
-**Client** (Mac OS 9 with Carbon API):
-- Receives primitives via OpenTransport
-- Renders natively with QuickDraw
-- Double-buffered offscreen GWorld
-- Handles clicks, scrolling, navigation
+    subgraph Server["Server (Node.js + Playwright)"]
+        B1[Receive Init +<br/>viewport size] --> B2[Launch Chromium<br/>at client dimensions]
+        B2 --> B3[Capture DOM with DOMSnapshot]
+        B3 --> B4[Extract positions,<br/>styles, text]
+        B4 --> B5[Substitute fonts<br/>Geneva/Monaco/Chicago]
+        B5 --> B6[Calculate widths using<br/>Mac OS 9 metrics]
+        B6 --> B7[Encode images<br/>to PICT format]
+        B7 --> B8[Serialize to<br/>binary primitives]
+    end
 
----
+    subgraph Network["WebSocket / Binary Protocol"]
+        B8 -->|"DrawText, DrawRect,<br/>DrawImage primitives<br/>+ scroll metadata<br/>~1KB per frame"| C1[Send frame]
+        C2[Receive events] -->|"Clicks, scrolls,<br/>resizes, navigation"| B3
+    end
 
-## Quick Start
+    subgraph Rendering["Client Rendering & Interaction"]
+        C1 --> D1[Deserialize<br/>primitives]
+        D1 --> D2[Update scrollbars<br/>with doc size]
+        D2 --> D3[Render to offscreen<br/>GWorld buffer]
+        D3 --> D4[Copy to window<br/>via QuickDraw]
+        D4 --> D5[User interactions:<br/>clicks, scrolls,<br/>window resize]
+        D5 --> C2
+        D5 -->|Window resized| D6[Reallocate GWorld<br/>+ send new primitives]
+        D6 --> C2
+    end
 
-### Server (macOS/Linux)
+    A7 --> B1
+    C2 --> B1
+
+    style Server fill:#e1f5ff
+    style Client fill:#fff5e1
+    style Network fill:#f0f0f0
+    style Rendering fill:#fff5e1
+```
+
+
+
+## Getting Started
+
+### Server
 
 ```bash
 # Install dependencies
 npm install
 
-# Compile TypeScript
-npx tsc
-
-# Run server (default port 8080)
-node dist/src/server-live.js
+# Run Server
+npm start
 ```
 
-The server will start on `ws://0.0.0.0:8080` and load `https://en.wikipedia.org` by default.
+The server will start on `ws://0.0.0.0:8080` and wait for the client to connect.
 
-### Client (Mac OS 9.2.2)
+### Client
 
-1. See `client-macos9/README.md` for CodeWarrior 8 build instructions
-2. Build and run the Carbon app
-3. It will connect to your server's IP address (Specified in `client-macos9/src/main_carbon.cpp` for now)
-4. Watch modern web pages render in QuickDraw
+1. **Start the server first** (see above)
+2. See `client-macos9/README.md` for CodeWarrior 8 build instructions
+3. Build and run the app
+4. **First Launch:** A console window will appear prompting you to configure the server
+   - Enter the IP address of the machine running the server (must be reachable by your Mac)
+   - Enter the server port or press Enter to use the default (8080)
+   - Settings are saved to `System Folder:Preferences:Mochila Preferences`
+   - The main browser window will then open and connect
+5. **Subsequent Launches:** Connects automatically using saved preferences
 
 ---
 
@@ -70,7 +101,7 @@ The server will start on `ws://0.0.0.0:8080` and load `https://en.wikipedia.org`
 
 ### Client
 - Mac OS 9 with Carbon API (9.2.2 is recommended and tested, however, you might get away with 9.1)
-- 16MB-ish of free RAM (This is a guess. In my testing, I couldn't get the client to eat more than 16MB)
+- 16MB-ish of free RAM (This is mostly a guess. In my testing, I couldn't get the client to eat more than 16MB.)
 - Tested with a 500MHz iBook G3 with 256MB of RAM installed. YMMV.
 
 ---
@@ -79,92 +110,60 @@ The server will start on `ws://0.0.0.0:8080` and load `https://en.wikipedia.org`
 
 ### Why primitives instead of pixels?
 
-Pixel-based approaches like [Browservice](https://github.com/ttalvitie/browservice) are very useful, but they create some problems:
-- **Anti-aliased text** compresses poorly and changes every frame
-- **Scrolling** requires sending a new image for every scroll, which is slow, laggy, and bandwidth intensive
-- **No interactivity** - can't click, scroll, or navigate easily
+Image-based approaches like [Browservice](https://github.com/ttalvitie/browservice) are great, but they have some drawbacks, namely:
+- **Anti-aliased text compresses poorly:** Subpixel rendering creates unique
+pixels at every scroll position, limiting the effectiveness of Tight-based diffing encoders like TightVNC.
+- **Scrolling** requires sending a new image for every scroll, which is slow and bandwidth intensive on old machines.
+- **Little interactivity:** can't click, scroll, or navigate easily.
 
-Browsers like [MacSurf](https://github.com/mplsllc/macsurf) run all JS, CSS, and layout logic on device. On a 25+ year old machine, it's an uphill battle. The performance requirements are simply too high. Mochila opts instead to do this heavy lifting on a server (using Chromium and Playwright) and stream only the drawing primitives over the network. This keeps the client extremely lightweight and fast.
+ 
 
-**Primitive streaming solves this:**
-- Text is actually text, not rasterized pixels
-- Scrolling merely moves graphical primitives +-N px
-- Primitives are tiny and fast to render, even on ancient hardware
-- No execution of heavy JS on the client side. Trying to do so on machines from 1998 is a nonstarter. The client just draws.
+**Mochila's solution:** Treat the page as what it actually is: a collection of text, boxes, shapes, and images at specific coordinates. Simply do all the heavy lifting on the server (using Chromium), and just tell the client what to draw. This approach has several advantages:
+- **Scrolling is trivial:** Just move primitives +/-N pixels. No need to recompute layout.
+- **Tiny bandwidth:** Usually less than 10KB per frame after initial load vs. 1MB+ for pixel-based diffs.
+- **Fast rendering:** QuickDraw is FAST. Even a low-end G3 can render thousands of primitives in a few hundred milliseconds, and usually a full page is only a few hundred.
+- **No client-side compute:** The client just draws. Browsers like [MacSurf](https://github.com/mplsllc/macsurf) run all JS, CSS, and layout logic on device. This is too much to ask of these old machines.
 
-### Some technical challenges
-
-**Font metrics mismatch** - The hardest problem by far. Chromium computes text layout with modern fonts, but the Mac OS 9 client renders with classic bitmap fonts. Without careful handling, text overflows or overlaps.
-
-**Solution:** Extracted authentic metrics from original Apple bitmap fonts. The server substitutes fonts and computes layout using the exact character widths the Mac OS 9 client will render with!
-
-**Image encoding** - Mac OS 9's QuickDraw library has no built in support for PNG/JPEG/WebP. It uses PICT.
-
-**Solution:** Server converts images to PICT using PackBits compression, handles mask-image CSS via alpha compositing, and downscales photos substantially to fit hardware constraints.
-
-**Change detection** - Only send what changed between frames.
-
-**Solution:** The server tracks primitives across frames and sends only those that changed or scrolled into view.
-
----
-
-## Technical Details
-
-**Font substitution:**
-- Extracted metrics from original Mac OS System 1.0-7.0 bitmap fonts (thx Internet Archive)
-- Supports Geneva (9, 10, 12pt), Monaco (9pt), Chicago (12pt) - more to come soon
-- CSS weight mapping: 500+ weight activates bold variant
-
-**PICT encoding:**
-- PackBits RLE compression for icons and graphics
-- JPEG passthrough for photos (QuickDraw native!)
-- Downscaling to smaller max dimensions for bandwidth
-- Mask compositing via alpha blending for mask-image CSS and SVG
-
-**Wire protocol:**
-- Binary format with type-length-value encoding
-- Lockstep frame acknowledgment (server waits for client ack)
-- Ridiculously lightweight. Usually < 1KB/frame after initial page load.
-
----
 
 ## What Works
 
-- **Static content sites**: Wikipedia, documentation sites, forums, blogs
+- **Static content sites**: Documentation sites, wikis, forums, blogs, etc.
 - **Navigation**: Clicking links, scrolling, back/forward
-- **Text rendering**: Authentic Mac OS 9 bitmap fonts (Geneva, Monaco, Chicago)
-- **Images**: Photos and icons via PICT encoding (downscaled for bandwidth)
-- **Basic forms**: Text input, buttons (no complex form validation)
-- **Layout**: Boxes, positioning, basic CSS (margins, padding, borders, colors)
+- **Text rendering**: Authentic Mac OS 9 bitmap fonts (Geneva, Monaco, Chicago at present)
+- **Images**: Photos and icons via PICT encoding
+- **Basic forms**: Text input, buttons
+- **Layout**: Boxes, positioning, basic CSS
+- **Dynamic viewport resizing**: Window can be resized and content re-renders at new dimensions
+- **Horizontal & vertical scrolling**: Native Mac OS 9 scrollbars with keyboard support
+- **Persistent preferences**: Server configuration saved across launches 
 
 ## Limitations
 
 ### By Design
 
-- **No client-side JavaScript** - All interaction is server-driven. This matches the security model and capabilities of the era.
-- **Image downscaling** - Photos limited to smaller dimensions. In the future I plan to increase image quality; this feature is just low on the priority list right now.
+- **No client-side JavaScript** - All computation is done on the server to spare the client's CPU and RAM.
+- **Image downscaling** - Photos limited to smaller dimensions due to memory and constraints.
 - **Single client per server** - Each client needs its own Chromium instance.
-- **Server-driven interaction** - Clicks/scrolls round-trip to server. Expect latency. 
+- **Server-driven interaction** - Clicks and scrolls round-trip to server. Expect latency. 
 
 ### Known Issues
 
 - **Limited CSS support** - Box model only. No flexbox, grid, transforms, animations, etc.
-- **React/SPA frameworks mostly broken** - Complex layouts, heavy JavaScript frameworks, and dynamic content usually fail.
+- **React/SPA frameworks mostly broken** - Complex layouts and dynamic content usually fail.
 - **No video or audio** - Only static images and text.
 - **Scrolling can be janky** - Performance varies by page complexity. I'm still refining the scrolling and primitive tracking logic.
 - **Incomplete rendering** - Some CSS properties ignored, so text may overflow on complex layouts.
-- **1024x768 viewport** - Using a fixed viewport size for now. I'll add support for other screen sizes in the future if it doesn't complicate the architecture too much.
 - **Eats CPU cycles at idle** - Not sure precisely why just yet, but it does. Possibly something to do with the client's event loop. I'll investigate.
-- **Font kerning can be weird** - Text gets horizontally compressed in some edge cases.
-- **Link hover behavior missing** - No underline on hover.
+- **Font kerning can be weird** - Text gets horizontally compressed beyond readability in some edge cases. In other cases, spacing is too far apart.
+- **Link hover behavior missing** - No underline or cursor change on hover.
 
----
+
 
 ## Expected Experience
 
-Think early-mid 2000s mobile/constrained-device browsing (remember Opera Mini?) rather than full-fledged desktop browsing. 
+Think early-mid 2000s mobile device browsing (remember Opera Mini?) rather than full-fledged desktop browsing. 
 
-Even pages that don't render perfectly are often still serviceable. Pixel-perfect reproduction is not the goal. Where other browsers might fail entirely, Mochila will often provide a useful, if imperfect, rendering. It's a tool for using the web as-is, not for recreating the web of the past. 
+Even pages that don't render perfectly are often still serviceable. Pixel-perfect reproduction is not the goal, nor will it ever be. Where fully on-device browsers fail entirely, Mochila will often provide a useful, if imperfect, rendering. 
 
 **Best for:**
 - Reading articles (Wikipedia, news sites, blogs)
@@ -176,42 +175,40 @@ Even pages that don't render perfectly are often still serviceable. Pixel-perfec
 - Modern, bloated web apps (e.g. Gmail, Twitter, and the like)
 - Video streaming
 - Real-time interactions requiring low latency
-- JS-heavy sites
 
----
+
 
 ## Recommended Sites
 
-- [Wikipedia](https://en.wikipedia.org) - Works great
-- [Hacker News](https://news.ycombinator.com) - Perfect for this
-- [old.reddit.com](https://old.reddit.com) - Old Reddit interface
-- [68kMLA](https://68kmla.org) - Classic Mac forums
-- [Macintosh Garden](https://macintoshgarden.org) - Vintage Mac software
-- [weather.gov](https://weather.gov) - NOAA weather
-
----
+- Wikipedia
+- Hacker News
+- old.reddit.com
+- 68kMLA
+- Macintosh Garden
+- weather.gov
 
 ## FAQ
 
 <details>
 <summary><b>How do I scroll?</b></summary>
-For now, use the arrow keys. This will change in the future.
+Use arrow keys (up/down for vertical, left/right for horizontal). Native scrollbars are also available, just click and drag them.
 </details>
 
 <details>
 <summary><b>I can't click links.</b></summary>
-Try double clicking. This will also change in the future to behave more like any other browser.
+Single click should work, but sometimes you may need to click a link a few times. Reposition your cursor if you encounter this issue.
 </details>
 
 <details>
 <summary><b>Where do I specify my server's IP address?</b></summary>
-In <code>client-macos9/src/main_carbon.cpp</code> for now. This will also change in the future.
+On first launch, Mochila will prompt you to enter your server address and port. Settings are saved to <code>System Folder:Preferences:Mochila Preferences</code>. To change servers later, just delete the preferences file and restart Mochila.
 </details>
 
 <details>
-<summary><b>How do I run the server?</b></summary>
-I usually run <code>npx tsc 2>&1 && pkill -f "server-live.js" 2>/dev/null; sleep 1 && node dist/src/server-live.js</code>. This compiles, kills any running server process, and starts the server.
+<summary><b>Can I resize the window?</b></summary>
+Yes! The window is fully resizable. Drag the grow box (bottom-right corner) or click the zoom box (top-right) to maximize. The viewport dynamically updates and the page re-renders at the new size.
 </details>
+
 
 <details>
 <summary><b>How do I compile and run the client?</b></summary>
@@ -219,27 +216,24 @@ See <code>client-macos9/README.md</code> for instructions.
 </details>
 
 <details>
-<summary><b>Why no pre-built .sit file?</b></summary>
-I'm making changes much faster than I can create new pre-built releases. In the mean time, building it is easy, just follow the instructions in <code>client-macos9/README.md</code>. When the application is more stable, I'll make releases.
+<summary><b>Where is the .sit file? I just wanna try it out!</b></summary>
+Check the Releases tab. However, please note that I'm making changes much faster than I can create new pre-built releases. The release may be a bit stale, but you're welcome to try it. If you want the latest version, you'll have to build it yourself, just follow the instructions in <code>client-macos9/README.md</code>. 
 </details>
 
 <details>
 <summary><b>Why?</b></summary>
-For the challenge, and because sometimes less is more. No animations, no autoplay, no algorithmic anything.
+For the challenge, and because sometimes less is more. No animations, no autoplay, no algorithmic BS.
 </details>
 
----
 
 ## Current Status
 
-The project is still in development, but it is already capable of browsing the web. It's a little slow and janky sometimes, but it works!
+The project is still in development, but it is already capable of browsing the web. Consider it a prototype, but a working one. It's a little janky sometimes, but it's good enough to use, and will only get better.
 
----
 
-<div align="center">
-
-### Why "Mochila"?
+## Why "Mochila"?
 
 Spanish for "backpack". Carry only what you need.
 
-</div>
+
+

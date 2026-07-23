@@ -57,6 +57,18 @@ export interface FrameUpdate {
 }
 
 /**
+ * Separate message for image data (async, no ack required)
+ *
+ * Images are sent separately from layout to avoid bloating FrameUpdates.
+ * Client receives these asynchronously and populates cached images by ID.
+ */
+export interface ImageData {
+  messageType: 'ImageData';
+  imageId: string;      // SHA256 hash of source URL
+  pictBytes: Buffer;    // PICT encoded image data
+}
+
+/**
  * Wire representation of primitives
  *
  * Each primitive has a type-specific payload:
@@ -79,6 +91,8 @@ export interface WireDrawText {
   identity: string;
   x: number;
   y: number;
+  width: number;
+  height: number;
   text: string;
   fontId: number;
   fontSize: number;
@@ -124,11 +138,12 @@ export interface WireDrawBorder {
 export interface WireDrawImage {
   type: 'DrawImage';
   identity: string;
+  imageId?: string;    // Hash of source URL - if present, client waits for ImageData message
   x: number;
   y: number;
   width: number;
   height: number;
-  pictBytes?: Buffer;  // Raw binary PICT data (optional, omitted if cached)
+  pictBytes?: Buffer;  // Raw binary PICT data (optional for backward compat, deprecated)
   zIndex: number;
   treeOrder: number;
 }
@@ -194,7 +209,7 @@ function calculateFrameUpdateSize(update: FrameUpdate): number {
       size += 1; // borderRadius
       size += 2 + 2; // zIndex, treeOrder
     } else if (prim.type === 'DrawText') {
-      size += 4 + 4 + 2 + 2 + 4 + 2; // x, y, fontId, fontSize, rgba, textLen
+      size += 4 + 4 + 2 + 2 + 2 + 2 + 4 + 2; // x, y, width, height, fontId, fontSize, rgba, textLen
       size += Buffer.byteLength(prim.text, 'utf-8');
       size += 2; // maxWidth
       size += 1; // fontFlags byte (italic | underline | bold | hasHoverColor | hoverUnderline)
@@ -205,10 +220,12 @@ function calculateFrameUpdateSize(update: FrameUpdate): number {
       size += 1; // borderRadius
       size += 2 + 2; // zIndex, treeOrder
     } else if (prim.type === 'DrawImage') {
-      size += 4 + 4 + 2 + 2 + 4; // x, y, width, height, imageBytesLen
-      if (prim.pictBytes) {
-        size += prim.pictBytes.length;
+      size += 4 + 4 + 2 + 2; // x, y, width, height
+      size += 2; // imageId length field
+      if (prim.imageId) {
+        size += Buffer.from(prim.imageId, 'utf8').length;
       }
+      size += 4; // pictBytes length (always 0 now)
       size += 2 + 2; // zIndex, treeOrder
     } else if (prim.type === 'DrawMaskedImage') {
       size += 4 + 4 + 2 + 2 + 4 + 4; // x, y, width, height, rgba, maskDataLen
@@ -312,6 +329,8 @@ export function serializeFrameUpdate(update: FrameUpdate): {
     } else if (prim.type === 'DrawText') {
       bytes.writeInt32LE(prim.x, offset); offset += 4;
       bytes.writeInt32LE(prim.y, offset); offset += 4;
+      bytes.writeUInt16LE(prim.width, offset); offset += 2;
+      bytes.writeUInt16LE(prim.height, offset); offset += 2;
       bytes.writeUInt16LE(prim.fontId, offset); offset += 2;
       bytes.writeUInt16LE(prim.fontSize, offset); offset += 2;
       bytes.writeUInt8(prim.color.r, offset); offset += 1;
@@ -362,12 +381,18 @@ export function serializeFrameUpdate(update: FrameUpdate): {
       bytes.writeUInt16LE(prim.width, offset); offset += 2;
       bytes.writeUInt16LE(prim.height, offset); offset += 2;
 
-      const imgLen = prim.pictBytes ? prim.pictBytes.length : 0;
-      bytes.writeUInt32LE(imgLen, offset); offset += 4;
-      if (prim.pictBytes && imgLen > 0) {
-        prim.pictBytes.copy(bytes, offset);
-        offset += imgLen;
+      // NEW: Write imageId for async image loading
+      const imageIdStr = prim.imageId || '';
+      const imageIdBuf = Buffer.from(imageIdStr, 'utf8');
+      bytes.writeUInt16LE(imageIdBuf.length, offset); offset += 2;
+      if (imageIdBuf.length > 0) {
+        imageIdBuf.copy(bytes, offset);
+        offset += imageIdBuf.length;
       }
+
+      // pictBytes length - always 0 now (sent via ImageData message)
+      bytes.writeUInt32LE(0, offset); offset += 4;
+
       bytes.writeInt16LE(prim.zIndex, offset); offset += 2;
       bytes.writeUInt16LE(prim.treeOrder, offset); offset += 2;
     } else if (prim.type === 'DrawMaskedImage') {
@@ -498,8 +523,10 @@ export function deserializeFrameUpdate(bytes: Buffer): FrameUpdate {
         treeOrder,
       });
     } else if (typeVal === 2) { // DrawText
-      const x = bytes.readInt16LE(offset); offset += 2;
-      const y = bytes.readInt16LE(offset); offset += 2;
+      const x = bytes.readInt32LE(offset); offset += 4;  // Fixed: was reading 2 bytes, should be 4
+      const y = bytes.readInt32LE(offset); offset += 4;  // Fixed: was reading 2 bytes, should be 4
+      const width = bytes.readUInt16LE(offset); offset += 2;
+      const height = bytes.readUInt16LE(offset); offset += 2;
       const fontId = bytes.readUInt16LE(offset); offset += 2;
       const fontSize = bytes.readUInt16LE(offset); offset += 2;
       const r = bytes.readUInt8(offset); offset += 1;
@@ -535,6 +562,8 @@ export function deserializeFrameUpdate(bytes: Buffer): FrameUpdate {
         identity,
         x,
         y,
+        width,
+        height,
         text,
         fontId,
         fontSize,
@@ -708,6 +737,42 @@ export function deserializeFrameAck(bytes: Buffer): FrameAck {
   };
 }
 
+/**
+ * Serialize ImageData message (MessageType 12)
+ *
+ * Format:
+ * - 1 byte: messageType (12)
+ * - 2 bytes: imageId length (uint16 LE)
+ * - N bytes: imageId (UTF-8)
+ * - 4 bytes: pictBytes length (uint32 LE)
+ * - M bytes: pictBytes
+ */
+export function serializeImageData(imageData: ImageData): {
+  structured: ImageData;
+  bytes: Buffer;
+  byteLength: number;
+} {
+  const imageIdBuf = Buffer.from(imageData.imageId, 'utf8');
+  const imageIdLen = imageIdBuf.length;
+  const pictLen = imageData.pictBytes.length;
+
+  const totalSize = 1 + 2 + imageIdLen + 4 + pictLen;
+  const bytes = Buffer.alloc(totalSize);
+
+  let offset = 0;
+  bytes.writeUInt8(12, offset); offset += 1;  // messageType = 12
+  bytes.writeUInt16LE(imageIdLen, offset); offset += 2;
+  imageIdBuf.copy(bytes, offset); offset += imageIdLen;
+  bytes.writeUInt32LE(pictLen, offset); offset += 4;
+  imageData.pictBytes.copy(bytes, offset);
+
+  return {
+    structured: imageData,
+    bytes,
+    byteLength: totalSize,
+  };
+}
+
 export interface ClientClick {
   messageType: 'Click';
   x: number;
@@ -846,6 +911,8 @@ export function primitiveToWire(prim: Primitive & { identity: string }): WirePri
         identity: prim.identity,
         x: prim.x,
         y: prim.y,
+        width: prim.width,
+        height: prim.height,
         text: prim.text,
         fontId: prim.fontId,
         fontSize: prim.fontSize,
@@ -890,18 +957,26 @@ export function primitiveToWire(prim: Primitive & { identity: string }): WirePri
         treeOrder: prim.treeOrder,
       };
 
-    case PrimitiveType.DrawImage:
+    case PrimitiveType.DrawImage: {
+      // NEW: Use imageId instead of pictBytes for async image loading
+      // imageId is a hash of the src URL - client will wait for ImageData message
+      const imageId = (prim as any).src
+        ? require('crypto').createHash('sha256').update((prim as any).src).digest('hex').substring(0, 16)
+        : undefined;
+
       return {
         type: 'DrawImage',
         identity: prim.identity,
+        imageId: imageId,  // NEW: Image identifier for async loading
         x: prim.x,
         y: prim.y,
         width: prim.width,
         height: prim.height,
-        pictBytes: prim.pictBytes,  // Base64 PICT data (optional)
+        pictBytes: prim.pictBytes,  // Keep pictBytes here for serialization stage
         zIndex: prim.zIndex,
         treeOrder: prim.treeOrder,
       };
+    }
 
     case PrimitiveType.DrawMaskedImage:
       return {

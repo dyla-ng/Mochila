@@ -4,36 +4,31 @@
 
 namespace mochila {
 
-PrimitiveStore::PrimitiveStore() : flatCacheDirty_(true) {}
+PrimitiveStore::PrimitiveStore() {}
 
 PrimitiveStore::~PrimitiveStore() { clear(); }
 
 void PrimitiveStore::clear() {
-  // Free all primitives across all zIndex buckets
-  for (ZIndexMap::iterator it = byZIndex_.begin(); it != byZIndex_.end();
-       ++it) {
-    for (size_t i = 0; i < it->second.size(); i++) {
-      PrimitivePtr prim = it->second[i];
-      if (prim) {
-        if (prim->type == PrimitiveType_DrawImage) {
-          DrawImagePrimitive *img = (DrawImagePrimitive *)prim;
-          if (img->hPict != NULL) {
-            DisposeHandle((Handle)img->hPict);
-            img->hPict = NULL;
-          }
+  // Free all primitives
+  for (size_t i = 0; i < primitives_.size(); i++) {
+    PrimitivePtr prim = primitives_[i];
+    if (prim) {
+      if (prim->type == PrimitiveType_DrawImage) {
+        DrawImagePrimitive *img = (DrawImagePrimitive *)prim;
+        if (img->hPict != NULL) {
+          DisposeHandle((Handle)img->hPict);
+          img->hPict = NULL;
         }
-        delete prim;
       }
+      delete prim;
     }
   }
-  byZIndex_.clear();
+  primitives_.clear();
   identityLookup_.clear();
   imageCache_.clear();
-  flatCache_.clear();
-  flatCacheDirty_ = true;
 }
 
-// Sort primitives within a zIndex bucket by treeOrder only
+// Sort primitives by treeOrder (document order)
 struct TreeOrderSorter {
   bool operator()(const PrimitivePtr &a, const PrimitivePtr &b) const {
     if (!a || !b)
@@ -57,7 +52,6 @@ static void freePrimitive(PrimitivePtr p) {
 
 void PrimitiveStore::applyFrameUpdate(const FrameUpdate &update) {
   size_t added = 0, changed = 0, removed = 0;
-  bool structureChanged = false;
 
   for (size_t i = 0; i < update.primitives.size(); i++) {
     PrimitivePtr prim = update.primitives[i];
@@ -69,26 +63,18 @@ void PrimitiveStore::applyFrameUpdate(const FrameUpdate &update) {
       IdentityMap::iterator it = identityLookup_.find(prim->identity);
       if (it != identityLookup_.end()) {
         PrimitivePtr existing = it->second;
-        int16_t zIndex = existing->zIndex;
 
-        // Remove from zIndex bucket
-        PrimitiveBucket &bucket = byZIndex_[zIndex];
-        for (size_t j = 0; j < bucket.size(); j++) {
-          if (bucket[j] == existing) {
-            freePrimitive(bucket[j]);
-            bucket.erase(bucket.begin() + j);
+        // Remove from vector
+        for (size_t j = 0; j < primitives_.size(); j++) {
+          if (primitives_[j] == existing) {
+            freePrimitive(primitives_[j]);
+            primitives_.erase(primitives_.begin() + j);
             break;
           }
         }
 
-        // Clean up empty bucket
-        if (bucket.empty()) {
-          byZIndex_.erase(zIndex);
-        }
-
         identityLookup_.erase(it);
         removed++;
-        structureChanged = true;
       }
     } else {
       // Handle image caching (PICT bytes only, not decoded handles)
@@ -113,90 +99,60 @@ void PrimitiveStore::applyFrameUpdate(const FrameUpdate &update) {
       if (it != identityLookup_.end()) {
         // Changed primitive - replace in-place
         PrimitivePtr existing = it->second;
-        int16_t oldZIndex = existing->zIndex;
-        int16_t newZIndex = prim->zIndex;
 
-        // Remove from old bucket
-        PrimitiveBucket &oldBucket = byZIndex_[oldZIndex];
-        for (size_t j = 0; j < oldBucket.size(); j++) {
-          if (oldBucket[j] == existing) {
-            freePrimitive(oldBucket[j]);
-            oldBucket.erase(oldBucket.begin() + j);
+        // SPECIAL CASE: For DrawImage, preserve client-side pictBytes and cached PicHandle
+        // The server sends empty pictBytes (images come via ImageData messages)
+        // We must not lose the client-side populated data when primitive is updated!
+        if (prim->type == PrimitiveType_DrawImage && existing->type == PrimitiveType_DrawImage) {
+          DrawImagePrimitive *newImg = (DrawImagePrimitive *)prim;
+          DrawImagePrimitive *existingImg = (DrawImagePrimitive *)existing;
+
+          // Preserve client-populated pictBytes and cached PicHandle
+          if (!existingImg->pictBytes.empty() && newImg->pictBytes.empty()) {
+            newImg->pictBytes = existingImg->pictBytes;
+            newImg->hPict = existingImg->hPict;
+            existingImg->hPict = NULL;  // Transfer ownership, don't dispose
+
+            std::cout << "[PrimitiveStore] Preserved pictBytes and PicHandle for image "
+                      << existingImg->imageId << std::endl;
+          }
+        }
+
+        // Remove from vector
+        for (size_t j = 0; j < primitives_.size(); j++) {
+          if (primitives_[j] == existing) {
+            freePrimitive(primitives_[j]);
+            primitives_[j] = prim;
             break;
           }
         }
-        if (oldBucket.empty()) {
-          byZIndex_.erase(oldZIndex);
-        }
 
-        // Insert into new bucket
-        byZIndex_[newZIndex].push_back(prim);
         identityLookup_[prim->identity] = prim;
-
         changed++;
-        if (oldZIndex != newZIndex) {
-          structureChanged = true; // zIndex changed, need to re-sort bucket
-        }
       } else {
-        // New primitive - add to bucket
-        byZIndex_[prim->zIndex].push_back(prim);
+        // New primitive - add to vector
+        primitives_.push_back(prim);
         identityLookup_[prim->identity] = prim;
         added++;
-        structureChanged = true;
       }
     }
   }
 
-  // Sort affected buckets by treeOrder (MUCH faster than sorting entire array!)
-  // Only sort if structure changed (add/remove) or if zIndex changed
-  if (structureChanged) {
-    for (ZIndexMap::iterator it = byZIndex_.begin(); it != byZIndex_.end();
-         ++it) {
-      std::sort(it->second.begin(), it->second.end(), TreeOrderSorter());
-    }
-  }
-
-  // Mark flat cache dirty if anything changed
-  if (added > 0 || changed > 0 || removed > 0) {
-    flatCacheDirty_ = true;
-  }
+  // Sort by treeOrder to maintain document order
+  // This is fast even with 2000 primitives (~1ms on G4)
+  std::sort(primitives_.begin(), primitives_.end(), TreeOrderSorter());
 
   std::cout << "[PrimitiveStore] Update: +" << added << " ~" << changed << " -"
-            << removed << " (sorted "
-            << (structureChanged ? byZIndex_.size() : 0) << " buckets)"
+            << removed << " (total: " << primitives_.size() << " primitives)"
             << std::endl;
 }
 
-void PrimitiveStore::rebuildFlatCache() const {
-  flatCache_.clear();
-
-  // Iterate through zIndex buckets in sorted order (map is already sorted by
-  // key)
-  for (ZIndexMap::const_iterator it = byZIndex_.begin(); it != byZIndex_.end();
-       ++it) {
-    // Each bucket is already sorted by treeOrder
-    for (size_t i = 0; i < it->second.size(); i++) {
-      flatCache_.push_back(it->second[i]);
-    }
-  }
-
-  flatCacheDirty_ = false;
-}
-
 const std::vector<PrimitivePtr> &PrimitiveStore::getPrimitives() const {
-  if (flatCacheDirty_) {
-    rebuildFlatCache();
-  }
-  return flatCache_;
+  return primitives_;
 }
 
 size_t PrimitiveStore::size() const {
-  size_t total = 0;
-  for (ZIndexMap::const_iterator it = byZIndex_.begin(); it != byZIndex_.end();
-       ++it) {
-    total += it->second.size();
-  }
-  return total;
+  return primitives_.size();
 }
 
 } // namespace mochila

@@ -63,6 +63,7 @@ struct DrawRectPrimitive : public Primitive {
 
 struct DrawTextPrimitive : public Primitive {
     int32_t x, y;
+    uint16_t width, height;  // DOMSnapshot bounding box dimensions
     std::string text;
     std::string macRomanText;
     uint16_t fontId;
@@ -76,7 +77,7 @@ struct DrawTextPrimitive : public Primitive {
     bool hoverUnderline;
 
     DrawTextPrimitive()
-        : x(0), y(0), fontId(1), fontSize(12), maxWidth(0),
+        : x(0), y(0), width(0), height(0), fontId(1), fontSize(12), maxWidth(0),
           isBold(false), isItalic(false), isUnderline(false),
           hasHoverColor(false), hoverUnderline(false) {
         type = PrimitiveType_DrawText;
@@ -98,11 +99,12 @@ struct DrawBorderPrimitive : public Primitive {
 struct DrawImagePrimitive : public Primitive {
     int32_t x, y;
     uint16_t width, height;
+    std::string imageId;  // Hash of source URL - used to match with ImageData
     std::vector<uint8_t> pictBytes;
     PicHandle hPict;
 
     DrawImagePrimitive()
-        : x(0), y(0), width(0), height(0), hPict(NULL) {
+        : x(0), y(0), width(0), height(0), imageId(""), hPict(NULL) {
         type = PrimitiveType_DrawImage;
     }
 };

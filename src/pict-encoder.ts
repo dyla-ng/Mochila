@@ -128,22 +128,59 @@ async function runMagick(args: string[], inputBuffer: Buffer): Promise<Buffer> {
 }
 
 /**
+ * Render an SVG data URL to PNG using Playwright
+ * This handles CSS variables and other browser-specific SVG features
+ */
+async function renderSvgToPng(svgDataUrl: string, page: any, width: number, height: number): Promise<Buffer> {
+  // Render SVG to PNG using the browser
+  const pngDataUrl = await page.evaluate(
+    ({ svgUrl, w, h }: { svgUrl: string; w: number; h: number }) => {
+      return new Promise<string>((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            reject(new Error('Could not get canvas context'));
+            return;
+          }
+          ctx.drawImage(img, 0, 0, w, h);
+          resolve(canvas.toDataURL('image/png'));
+        };
+        img.onerror = () => reject(new Error('Failed to load SVG'));
+        img.src = svgUrl;
+      });
+    },
+    { svgUrl: svgDataUrl, w: width, h: height }
+  );
+
+  // Convert data URL to buffer
+  const base64Data = pngDataUrl.replace(/^data:image\/png;base64,/, '');
+  return Buffer.from(base64Data, 'base64');
+}
+
+/**
  * Encode an image URL to PICT format entirely in memory
  * Uses ImageMagick via streams (stdin/stdout) to handle the conversion
  *
  * @param imageUrl - URL or data URL of the image to encode
  * @param maxPhotoDimension - Maximum dimension for photos (default 240)
  * @param maskColor - Optional CSS color for mask-image compositing (e.g. 'rgb(64, 66, 68)')
+ * @param page - Optional Playwright page for rendering SVGs with CSS variables
  */
 export async function encodeImageToPict(
   imageUrl: string,
   maxPhotoDimension: number = 240,
   maskColor?: string,
-  backgroundColor?: string
+  backgroundColor?: string,
+  page?: any // Optional Playwright page for rendering SVGs
 ): Promise<PictEncodeResult> {
   const startTime = Date.now();
 
   let inputBuffer: Buffer;
+  let isSvgRendered = false;
 
   const cachedBuffer = rawBytesCache.get(imageUrl);
   if (cachedBuffer) {
@@ -156,7 +193,17 @@ export async function encodeImageToPict(
     const metadata = imageUrl.substring(0, commaIndex);
     const dataPart = imageUrl.substring(commaIndex + 1);
 
-    if (metadata.includes('base64')) {
+    // Check if this is an SVG data URL with a page available
+    const isSvg = metadata.includes('image/svg+xml');
+    if (isSvg && page) {
+      // Render SVG to PNG using the browser to handle CSS variables
+      // Cap SVG rendering at 256x256 to prevent huge encodes
+      // (4096x4096 takes 59+ seconds! Most SVGs are small icons anyway)
+      const svgRenderSize = Math.min(maxPhotoDimension, 256);
+      console.log(`[PICT] Rendering SVG at ${svgRenderSize}x${svgRenderSize} (capped for performance)`);
+      inputBuffer = await renderSvgToPng(imageUrl, page, svgRenderSize, svgRenderSize);
+      isSvgRendered = true;
+    } else if (metadata.includes('base64')) {
       inputBuffer = Buffer.from(dataPart, 'base64');
     } else {
       let decoded = dataPart;
@@ -178,8 +225,14 @@ export async function encodeImageToPict(
   let format = 'png'; // default fallback
   let detected = false;
 
+  // If we rendered SVG to PNG, treat it as PNG
+  if (isSvgRendered) {
+    format = 'png';
+    detected = true;
+  }
+
   // Check data URL MIME type first (highest priority for data: URLs)
-  if (imageUrl.startsWith('data:')) {
+  if (!detected && imageUrl.startsWith('data:')) {
     const mimeEnd = imageUrl.indexOf(';');
     const mime = mimeEnd !== -1 ? imageUrl.substring(5, mimeEnd) : imageUrl.substring(5, imageUrl.indexOf(','));
     if (mime === 'image/svg+xml' || mime === 'image/svg') {

@@ -25,67 +25,79 @@
 
 namespace mochila {
 
-// Helper: Convert UTF-8 encoded text to Mac Roman for native QuickDraw
-// DrawString
-static std::string utf8ToMacRoman(const std::string &input) {
-  std::string out;
-  out.reserve(input.length());
+// Sort primitives by zIndex first (layering), then treeOrder (document order)
+// This ensures backgrounds render before text (low zIndex) while maintaining
+// correct document flow within each layer.
+struct ZIndexThenTreeOrderSorter {
+  bool operator()(const PrimitivePtr &a, const PrimitivePtr &b) const {
+    if (!a || !b)
+      return a != NULL;
+
+    // First sort by zIndex (backgrounds before text)
+    if (a->zIndex != b->zIndex)
+      return a->zIndex < b->zIndex;
+
+    // Within same zIndex, sort by treeOrder (document order)
+    return a->treeOrder < b->treeOrder;
+  }
+};
+
+// Helper: Convert UTF-8 to UniChar (UTF-16) for ATSUI
+static std::vector<UniChar> utf8ToUniChar(const std::string &input) {
+  std::vector<UniChar> result;
+  result.reserve(input.length());
 
   size_t i = 0;
   while (i < input.length()) {
     unsigned char c = (unsigned char)input[i];
 
-    if (c < 0x80) { // ASCII
-      out.push_back(c);
+    if (c < 0x80) {
+      // ASCII
+      result.push_back((UniChar)c);
       i++;
-    } else if ((c & 0xE0) == 0xC0 && i + 1 < input.length()) { // 2-byte UTF-8
+    } else if ((c & 0xE0) == 0xC0 && i + 1 < input.length()) {
+      // 2-byte UTF-8
       unsigned char c2 = (unsigned char)input[i + 1];
-      uint32_t code = ((c & 0x1F) << 6) | (c2 & 0x3F);
-      if (code == 0xA0)
-        out.push_back(' '); // Non-breaking space
-      else if (code == 0xA7)
-        out.push_back(0xA4); // Section symbol §
-      else if (code == 0xA9)
-        out.push_back(0xA9); // Copyright ©
-      else if (code == 0xAE)
-        out.push_back(0xA8); // Registered ®
-      else if (code >= 0xC0 && code <= 0xFF)
-        out.push_back(c); // Latin-1 fallback
-      else
-        out.push_back(' ');
+      UniChar code = ((c & 0x1F) << 6) | (c2 & 0x3F);
+      result.push_back(code);
       i += 2;
-    } else if ((c & 0xF0) == 0xE0 && i + 2 < input.length()) { // 3-byte UTF-8
+    } else if ((c & 0xF0) == 0xE0 && i + 2 < input.length()) {
+      // 3-byte UTF-8
       unsigned char c2 = (unsigned char)input[i + 1];
       unsigned char c3 = (unsigned char)input[i + 2];
-      uint32_t code = ((c & 0x0F) << 12) | ((c2 & 0x3F) << 6) | (c3 & 0x3F);
-
-      if (code == 0x2018 || code == 0x2019)
-        out.push_back(0xD5); // Single quotes ‘ ’ -> Mac Roman ’
-      else if (code == 0x201C || code == 0x201D)
-        out.push_back(0xD2); // Double quotes “ ” -> Mac Roman “
-      else if (code == 0x2013)
-        out.push_back(0xD6); // En-dash –
-      else if (code == 0x2014)
-        out.push_back(0xD7); // Em-dash —
-      else if (code == 0x2022)
-        out.push_back(0xA5); // Bullet •
-      else if (code == 0x2026)
-        out.push_back(0xC9); // Ellipsis …
-      else
-        out.push_back(' ');
+      UniChar code = ((c & 0x0F) << 12) | ((c2 & 0x3F) << 6) | (c3 & 0x3F);
+      result.push_back(code);
       i += 3;
+    } else if ((c & 0xF8) == 0xF0 && i + 3 < input.length()) {
+      // 4-byte UTF-8 (surrogate pairs for ATSUI)
+      // For simplicity, replace with replacement character
+      result.push_back(0xFFFD);
+      i += 4;
     } else {
-      out.push_back(' ');
+      // Invalid UTF-8, skip
+      result.push_back(0x003F); // '?'
       i++;
     }
   }
-  return out;
+
+  return result;
 }
 
+// REMOVED: utf8ToMacRoman() is now only in wire_protocol.cpp
+// Text conversion happens once during deserialization, not during rendering
+// Keeping this comment to explain why the function was removed
+//
+// Old function signature was:
+//   static std::string utf8ToMacRoman(const std::string &input)
+//
+// This caused double-conversion corruption! Now conversion happens once
+// in wire_protocol.cpp when deserializing text primitives.
+
 QuickDrawRenderer::QuickDrawRenderer(int width, int height, const char *title)
-    : window_(NULL), gWorld_(NULL), width_(width), height_(height), scrollY_(0),
-      lastRenderedScrollY_(0), lastTextY_(-9999), lastPenX_(-9999),
-      lastChromiumEnd_(-9999), hasLastText_(false) {
+    : window_(NULL), gWorld_(NULL), vScrollBar_(NULL), hScrollBar_(NULL),
+      width_(width), height_(height), scrollY_(0), scrollX_(0),
+      lastRenderedScrollY_(0), lastRenderedScrollX_(0), lastTextY_(0), lastPenX_(0), lastChromiumEnd_(0),
+      hasLastText_(false) {
 
   // Enable fractional character widths & font kerning tables in QuickDraw
   SetFractEnable(true);
@@ -94,11 +106,17 @@ QuickDrawRenderer::QuickDrawRenderer(int width, int height, const char *title)
   // 9
   SetOutlinePreferred(true);
 
+  // Center window on screen
+  BitMap screenBits;
+  GetQDGlobalsScreenBits(&screenBits);
+  int screenWidth = screenBits.bounds.right - screenBits.bounds.left;
+  int screenHeight = screenBits.bounds.bottom - screenBits.bounds.top;
+
   Rect wRect;
-  wRect.left = 50;
-  wRect.top = 50;
-  wRect.right = 50 + width;
-  wRect.bottom = 50 + height;
+  wRect.left = (screenWidth - width) / 2;
+  wRect.top = ((screenHeight - height) / 2) + 20; // +20 for menu bar
+  wRect.right = wRect.left + width;
+  wRect.bottom = wRect.top + height;
 
   Str255 pTitle;
   size_t len = strlen(title);
@@ -107,7 +125,8 @@ QuickDrawRenderer::QuickDrawRenderer(int width, int height, const char *title)
   pTitle[0] = (unsigned char)len;
   memcpy(&pTitle[1], title, len);
 
-  window_ = NewCWindow(NULL, &wRect, pTitle, true, documentProc, (WindowRef)-1L,
+  // Use zoomDocProc to enable both zoom box and grow box (resize handle)
+  window_ = NewCWindow(NULL, &wRect, pTitle, true, zoomDocProc, (WindowRef)-1L,
                        true, 0);
   if (!window_) {
     std::cerr << "[QuickDraw] NewCWindow failed!" << std::endl;
@@ -124,24 +143,57 @@ QuickDrawRenderer::QuickDrawRenderer(int width, int height, const char *title)
   gRect.right = width;
   gRect.bottom = height;
 
-  // Use depth 0 (screen native depth) to save heap memory
+  // Use depth 0 (screen native depth) - this is what worked in the original version
   QDErr err = NewGWorld(&gWorld_, 0, &gRect, NULL, NULL, 0);
   if (err != noErr || !gWorld_) {
-    std::cerr << "[QuickDraw] NewGWorld failed with error: " << err
-              << std::endl;
+    std::cerr << "[QuickDraw] NewGWorld failed with error: " << err << std::endl;
+    return;
   }
 
+  std::cout << "[QuickDraw] Created GWorld (screen native depth)" << std::endl;
+
+  PixMapHandle gwPixMap = GetGWorldPixMap(gWorld_);
+  if (!LockPixels(gwPixMap)) {
+    std::cerr << "[QuickDraw] LockPixels failed!" << std::endl;
+    return;
+  }
+
+  std::cout << "[QuickDraw] GWorld: depth=" << (**gwPixMap).pixelSize
+            << " pixelType=" << (**gwPixMap).pixelType << std::endl;
+
+  UnlockPixels(gwPixMap);
+
+  // Set up drawing context
   CGrafPtr origPort;
   GDHandle origDev;
   GetGWorld(&origPort, &origDev);
   SetGWorld(gWorld_, NULL);
+
+  // Initialize GWorld with proper drawing state
+  PenNormal(); // Set pen to normal mode (copy, not blend)
+  RGBColor black = {0x0000, 0x0000, 0x0000};
+  RGBForeColor(&black);
+  RGBColor white = {0xFFFF, 0xFFFF, 0xFFFF};
+  RGBBackColor(&white);
+
+  // Create native scrollbars
+  createScrollBars();
+
   clearScreen();
   SetGWorld(origPort, origDev);
-
   copyGWorldToWindow();
 }
 
 QuickDrawRenderer::~QuickDrawRenderer() {
+  // Dispose of scrollbar controls
+  if (vScrollBar_) {
+    DisposeControl(vScrollBar_);
+    vScrollBar_ = NULL;
+  }
+  if (hScrollBar_) {
+    DisposeControl(hScrollBar_);
+    hScrollBar_ = NULL;
+  }
   if (gWorld_) {
     DisposeGWorld(gWorld_);
     gWorld_ = NULL;
@@ -171,27 +223,18 @@ void QuickDrawRenderer::drawRect(int x, int y, int w, int h, const Color &color,
   if (!gWorld_)
     return;
 
-  // DEBUG: Log when we try to draw rounded rects
-  static int roundedCount = 0;
-  if (borderRadius > 0 && roundedCount < 5) {
-    std::cout << "[DEBUG] drawRect with borderRadius=" << borderRadius
-              << " at (" << x << "," << y << ") " << w << "x" << h << std::endl;
-    roundedCount++;
-  }
-
   Rect r;
   r.left = x;
   r.top = y;
   r.right = x + w;
   r.bottom = y + h;
+
   RGBColor qdColor = {(unsigned short)(color.r * 257),
                       (unsigned short)(color.g * 257),
                       (unsigned short)(color.b * 257)};
   RGBForeColor(&qdColor);
 
   if (borderRadius > 0) {
-    // Use PaintRoundRect for rounded corners
-    // ovalWidth and ovalHeight are diameter, not radius
     PaintRoundRect(&r, borderRadius * 2, borderRadius * 2);
   } else {
     PaintRect(&r);
@@ -205,12 +248,68 @@ void QuickDrawRenderer::drawText(int x, int y, const std::string &text,
   if (!gWorld_ || text.empty())
     return;
 
-  // Convert input string from UTF-8 to Mac Roman
-  std::string macText = utf8ToMacRoman(text);
-  if (macText.empty())
+  // Text is already converted to Mac Roman by wire_protocol.cpp
+  // Do NOT convert again or it will corrupt the text!
+  const std::string& macText = text;
+  if (macText.empty()) {
+    static int emptyCount = 0;
+    emptyCount++;
+    if (emptyCount <= 20) {
+      std::cout << "[DEBUG] EMPTY TEXT #" << emptyCount << " after conversion: \""
+                << text.substr(0, 50) << "\" (skipping)" << std::endl;
+    }
     return;
+  }
 
-  // Map fontId strictly to Mac OS 9 font definitions matching font-table.ts
+  // Check if converted text is all spaces/whitespace (invisible when rendered)
+  bool allSpaces = true;
+  for (size_t i = 0; i < macText.length(); i++) {
+    if (macText[i] != ' ' && macText[i] != '\t' && macText[i] != '\n' && macText[i] != '\r') {
+      allSpaces = false;
+      break;
+    }
+  }
+  if (allSpaces) {
+    static int spacesCount = 0;
+    spacesCount++;
+    if (spacesCount <= 20) {
+      std::cout << "[DEBUG] ALL-SPACES TEXT #" << spacesCount << " after conversion: \""
+                << text.substr(0, 50) << "\" -> \"" << macText << "\" (skipping)" << std::endl;
+    }
+    return;
+  }
+
+  // DEBUG: Check for white text (would be invisible on white background)
+  static int whiteTextCount = 0;
+  if (color.r > 240 && color.g > 240 && color.b > 240) {
+    whiteTextCount++;
+    if (whiteTextCount <= 10) {
+      std::cout << "[DEBUG] WHITE TEXT #" << whiteTextCount << ": \""
+                << macText.substr(0, 30) << "\" at (" << x << "," << y << ")"
+                << " color=(" << (int)color.r << "," << (int)color.g << "," << (int)color.b << ")"
+                << std::endl;
+    }
+  }
+
+  // DEBUG: Log first 50 text draws to find overlapping text
+  static int drawCount = 0;
+  static int lastY = -1000;
+
+  if (drawCount < 50) {
+    int yDiff = y - lastY;
+    bool possibleOverlap = (yDiff >= 0 && yDiff < fontSize);
+
+    std::cout << "[DEBUG] Text #" << drawCount << ": y=" << y
+              << " (diff=" << yDiff << ")"
+              << (possibleOverlap ? " [OVERLAP?]" : "")
+              << " \"" << macText.substr(0, 40) << "\""
+              << std::endl;
+  }
+
+  lastY = y;
+  drawCount++;
+
+  // Map fontId to QuickDraw font ID
   short qdFont = kFontIDGeneva;
   switch (fontId) {
   case 1:
@@ -230,7 +329,7 @@ void QuickDrawRenderer::drawText(int x, int y, const std::string &text,
   case 9:
   case 10:
   case 11:
-    qdFont = kFontIDTimes; // New York / Times (Serif)
+    qdFont = kFontIDTimes; // Times (Serif)
     break;
   case 12:
   case 13:
@@ -242,14 +341,16 @@ void QuickDrawRenderer::drawText(int x, int y, const std::string &text,
     break;
   }
 
+  // Set QuickDraw font and style
   TextFont(qdFont);
 
-  // Reduce font size by ~5% to account for Geneva being wider than web fonts
-  // This prevents excessive CharExtra compression for normal text
-  int actualSize = fontSize > 0 ? fontSize : 12;
-  int adjustedSize = (int)(actualSize * 0.95f);
-  if (adjustedSize < 9) adjustedSize = 9;  // Don't go below 9pt
-  TextSize(adjustedSize);
+  // Scale Geneva down by 8% to compensate for it being ~11% wider than Arial
+  // This reduces the amount of CharExtra adjustment needed
+  int effectiveFontSize = fontSize > 0 ? fontSize : 12;
+  if (qdFont == kFontIDGeneva && effectiveFontSize > 8) {
+    effectiveFontSize = (int)(effectiveFontSize * 0.92);
+  }
+  TextSize(effectiveFontSize);
 
   Style face = normal;
   if (isBold)
@@ -260,92 +361,104 @@ void QuickDrawRenderer::drawText(int x, int y, const std::string &text,
     face |= underline;
   TextFace(face);
 
-  // Set QuickDraw TextMode to srcOr (transparent text background) so background
-  // rects are preserved
+  // Set text mode to srcOr (transparent background)
   TextMode(srcOr);
 
+  // Set text color
   RGBColor qdColor = {(unsigned short)(color.r * 257),
                       (unsigned short)(color.g * 257),
                       (unsigned short)(color.b * 257)};
   RGBForeColor(&qdColor);
 
-  // Calculate baseline position for text rendering
-  // Range.getBoundingClientRect() gives us the TOP of the text box,
-  // and we need to add the ascent to get the baseline.
-  const float FONT_TABLE_ASCENT_RATIO = 1.0;
-  int ascent = (int)(adjustedSize * FONT_TABLE_ASCENT_RATIO);
+  // Get font metrics for baseline calculation
+  FontInfo finfo;
+  GetFontInfo(&finfo);
+  int ascent = finfo.ascent;
 
-  // Check if this text primitive is on the same visual line and adjacent to the
-  // previous text primitive
-  bool continuePen = false;
-  if (hasLastText_ && std::abs(y - lastTextY_) <= 4) {
-    int gap = x - lastPenX_;
-    int chromiumGap = x - lastChromiumEnd_;
+  // DEBUG: Log ascent value for first few draws
+  if (drawCount <= 3) {
+    std::cout << "[DEBUG] FontInfo: ascent=" << ascent
+              << " descent=" << finfo.descent
+              << " leading=" << finfo.leading
+              << " -> final baseline y=" << (y + ascent) << std::endl;
+  }
 
-    // CRITICAL: Only continue pen for genuine inline text (paragraph words),
-    // NOT for separate UI elements (buttons, nav items, etc.)
-    //
-    // If chromiumGap > 6px, this indicates separate elements (flexbox gaps,
-    // button spacing, etc.) and we should trust the server's absolute position.
-    //
-    // Only continue for tight inline text where chromiumGap <= 6px (word
-    // spacing)
-    if (gap < 60 && chromiumGap <= 6) {
-      continuePen = true;
+  // Measure actual rendered width and adjust spacing to fit targetWidth
+  bool spacingAdjusted = false;
+  if (targetWidth > 0 && macText.length() > 0) {
+    // Measure how wide QuickDraw will render this text
+    int actualWidth = TextWidth(macText.data(), 0, macText.length());
+    int widthDiff = targetWidth - actualWidth;
+
+    // Only adjust if difference is significant (more than 2 pixels)
+    if (abs(widthDiff) > 2) {
+      // Distribute spacing adjustment across all characters
+      // Use Fixed-point math (16.16 format): shift left 16 bits
+      Fixed charExtraAmount = ((long)widthDiff << 16) / (long)macText.length();
+      CharExtra(charExtraAmount);
+      spacingAdjusted = true;
+
+      // DEBUG: Log spacing adjustments for first few
+      static int adjustCount = 0;
+      if (adjustCount < 10) {
+        std::cout << "[DEBUG] Text spacing: actual=" << actualWidth
+                  << " target=" << targetWidth
+                  << " diff=" << widthDiff
+                  << " charExtra=" << (charExtraAmount >> 16) << "." << (charExtraAmount & 0xFFFF)
+                  << " text=\"" << text.substr(0, 30) << "\"" << std::endl;
+        adjustCount++;
+      }
     }
   }
 
-  if (continuePen) {
-    int targetX = lastPenX_;
-    int chromiumGap = x - lastChromiumEnd_;
-
-    // Preserve small word-spacing gaps (1-6px) from Chromium layout
-    if (chromiumGap >= 2) {
-      targetX += chromiumGap; // Don't cap at 8 - trust the gap for inline text
-    }
-
-    MoveTo(targetX, y + ascent);
-  } else {
-    MoveTo(x, y + ascent);
+  // Clip text to its bounding box to prevent overflow (as final safeguard)
+  if (targetWidth > 0) {
+    Rect clipRect;
+    clipRect.left = x;
+    clipRect.top = y;
+    clipRect.right = x + targetWidth;
+    clipRect.bottom = y + fontSize + 10; // Add some padding for descenders
+    ClipRect(&clipRect);
   }
 
-  Str255 pStr;
-  size_t len = macText.length();
-  if (len > 255)
-    len = 255;
-  pStr[0] = (unsigned char)len;
-  memcpy(&pStr[1], macText.data(), len);
+  // Position pen at baseline (DOMSnapshot gives top-left, we need baseline)
+  MoveTo(x, y + ascent);
 
-  // If targetWidth is provided, check if Mac OS 9 text width exceeds target
-  // container width Apply CharExtra to squeeze character spacing slightly so
-  // text stays strictly inside bounds
-  bool appliedCharExtra = false;
-  if (targetWidth > 0 && macText.length() > 1) {
-    int nativeWidth = TextWidth(macText.data(), 0, macText.length());
-    if (nativeWidth > targetWidth) {
-      float reducePerChar =
-          (float)(targetWidth - nativeWidth) / (float)(macText.length() - 1);
-      if (reducePerChar < -1.5f)
-        reducePerChar = -1.5f; // Cap max compression
-      CharExtra(X2Fix(reducePerChar));
-      appliedCharExtra = true;
-    }
+  // Draw text with adjusted spacing
+  DrawText(macText.data(), 0, macText.length());
+
+  // Reset spacing adjustment
+  if (spacingAdjusted) {
+    CharExtra(0);
   }
 
-  DrawString(pStr);
-
-  if (appliedCharExtra) {
-    CharExtra(0); // Reset CharExtra after drawing
+  // Reset clip region to full viewport
+  if (targetWidth > 0) {
+    Rect fullClip;
+    fullClip.left = 0;
+    fullClip.top = ADDRESS_BAR_HEIGHT;
+    fullClip.right = 10000;
+    fullClip.bottom = 10000;
+    ClipRect(&fullClip);
   }
 
-  // Track pen position after DrawString
-  Point endPen;
-  GetPen(&endPen);
-  int macTextWidth = TextWidth(macText.data(), 0, macText.length());
-  lastTextY_ = y;
-  lastPenX_ = endPen.h;
-  lastChromiumEnd_ = x + (targetWidth > 0 ? targetWidth : macTextWidth);
-  hasLastText_ = true;
+  // DEBUG: Draw red border around text area to visualize what's being drawn
+  // Use actual DOMSnapshot bounding box dimensions instead of guessing
+  if (targetWidth > 0) {  // Only draw if we have valid dimensions
+    RGBColor red = {0xFFFF, 0x0000, 0x0000};
+    RGBForeColor(&red);
+    PenSize(1, 1);
+
+    Rect debugRect;
+    debugRect.left = x;
+    debugRect.top = y;
+    debugRect.right = x + targetWidth;  // Use actual width from DOMSnapshot
+    debugRect.bottom = y + fontSize + 4; // Use fontSize for height (close enough)
+    FrameRect(&debugRect);
+
+    // Restore color
+    RGBForeColor(&qdColor);
+  }
 }
 
 void QuickDrawRenderer::drawBorder(int x, int y, int w, int h, int thickness,
@@ -357,6 +470,7 @@ void QuickDrawRenderer::drawBorder(int x, int y, int w, int h, int thickness,
                       (unsigned short)(color.g * 257),
                       (unsigned short)(color.b * 257)};
   RGBForeColor(&qdColor);
+
 
   // IMPROVED: Draw concentric frames instead of single thick pen
   // This avoids the corner overlap artifacts
@@ -381,7 +495,7 @@ void QuickDrawRenderer::drawBorder(int x, int y, int w, int h, int thickness,
 
 void QuickDrawRenderer::drawImage(int x, int y, int w, int h,
                                   const std::vector<uint8_t> &pictBytes,
-                                  PicHandle* cachedPicHandlePtr) {
+                                  PicHandle *cachedPicHandlePtr) {
   if (!gWorld_)
     return;
   if (w <= 0 || h <= 0)
@@ -441,7 +555,15 @@ void QuickDrawRenderer::drawMaskedImage(int x, int y, int w, int h,
                                         const std::vector<uint8_t> &maskData) {
   if (!gWorld_)
     return;
-  if (w <= 0 || h <= 0 || maskData.empty())
+
+  // Diagnostic logging
+  if (maskData.empty()) {
+    std::cout << "[DrawMaskedImage] WARNING: Empty maskData at (" << x << "," << y
+              << ") size " << w << "x" << h << " - nothing will render!" << std::endl;
+    return;
+  }
+
+  if (w <= 0 || h <= 0)
     return;
 
   // maskData is 1-bit packed sequentially (8 pixels per byte, MSB first)
@@ -463,7 +585,8 @@ void QuickDrawRenderer::drawMaskedImage(int x, int y, int w, int h,
   RGBForeColor(&qColor);
 
   // Draw each pixel where mask is 1
-  // This is simple but works correctly for small icons
+  // Use PaintRect for reliable pixel rendering in GWorld
+  int pixelsDrawn = 0;
   for (int py = 0; py < h; py++) {
     for (int px = 0; px < w; px++) {
       int bitIndex = py * w + px;
@@ -475,12 +598,26 @@ void QuickDrawRenderer::drawMaskedImage(int x, int y, int w, int h,
         bool pixelOn = (byte & (1 << bitOffset)) != 0;
 
         if (pixelOn) {
-          // Draw this pixel
-          MoveTo(x + px, y + py);
-          LineTo(x + px, y + py);
+          // Draw this pixel as a 1x1 rectangle
+          Rect pixelRect;
+          pixelRect.left = x + px;
+          pixelRect.top = y + py;
+          pixelRect.right = x + px + 1;
+          pixelRect.bottom = y + py + 1;
+          PaintRect(&pixelRect);
+          pixelsDrawn++;
         }
       }
     }
+  }
+
+  // Diagnostic: warn if no pixels were drawn
+  if (pixelsDrawn == 0) {
+    std::cout << "[DrawMaskedImage] WARNING: Mask at (" << x << "," << y
+              << ") " << w << "x" << h << " has ALL ZERO bits - invisible!" << std::endl;
+    std::cout << "[DrawMaskedImage] MaskData size: " << maskData.size()
+              << " bytes, fillColor: RGB(" << (int)fillColor.r << ","
+              << (int)fillColor.g << "," << (int)fillColor.b << ")" << std::endl;
   }
 
   // Reset foreground color to black
@@ -492,13 +629,15 @@ void QuickDrawRenderer::drawAddressBar() {
   if (!gWorld_)
     return;
 
-  // 1. Toolbar Background Rect (Light Grey)
+  const int kScrollBarWidth = 16;  // Standard Mac OS scrollbar width
+
+  // 1. Toolbar Background Rect (Light Grey) - exclude scrollbar area
   Color bgBar(235, 235, 238);
-  drawRect(0, 0, width_, ADDRESS_BAR_HEIGHT, bgBar);
+  drawRect(0, 0, width_ - kScrollBarWidth, ADDRESS_BAR_HEIGHT, bgBar);
 
   // Bottom border line
   Color lineBorder(180, 180, 185);
-  drawRect(0, ADDRESS_BAR_HEIGHT - 1, width_, 1, lineBorder);
+  drawRect(0, ADDRESS_BAR_HEIGHT - 1, width_ - kScrollBarWidth, 1, lineBorder);
 
   // 2. Buttons: [<] [>] [R]
   Color btnBg(245, 245, 248);
@@ -533,7 +672,7 @@ void QuickDrawRenderer::drawAddressBar() {
   // Display URL text
   std::string displayUrl = addressBarFocused_ ? addressBarText_ : currentUrl_;
   if (displayUrl.empty())
-    displayUrl = "https://en.wikipedia.org/wiki/PowerPC_7xx";
+    displayUrl = " ";
   Color urlColor(20, 20, 20);
   drawText(urlX + 8, 8, displayUrl, 0, 12, urlColor);
 
@@ -565,21 +704,23 @@ void QuickDrawRenderer::updateAddressBarOnly() {
   SetGWorld(origPort, origDev);
 
   // Blit only the address bar region to window (not the whole screen!)
-  GrafPtr winPort = GetWindowPort(window_);
-  PixMapHandle pixMap = GetGWorldPixMap(gWorld_);
-  LockPixels(pixMap);
+  CGrafPtr winPort = GetWindowPort(window_);
+  PixMapHandle srcPixMap = GetGWorldPixMap(gWorld_);
+  PixMapHandle dstPixMap = GetPortPixMap(winPort);
+  LockPixels(srcPixMap);
+
+  const int kScrollBarWidth = 16;  // Standard Mac OS scrollbar width
 
   Rect addressBarBounds;
   addressBarBounds.left = 0;
   addressBarBounds.top = 0;
-  addressBarBounds.right = width_;
+  addressBarBounds.right = width_ - kScrollBarWidth;  // Exclude scrollbar area
   addressBarBounds.bottom = ADDRESS_BAR_HEIGHT;
 
-  BitMap *srcMap = (BitMap *)*pixMap;
-  BitMap *dstMap = (BitMap *)GetPortBitMapForCopyBits(winPort);
-
-  CopyBits(srcMap, dstMap, &addressBarBounds, &addressBarBounds, srcCopy, NULL);
-  UnlockPixels(pixMap);
+  // Use PixMap for color graphics, not BitMap
+  CopyBits((BitMap *)*srcPixMap, (BitMap *)*dstPixMap, &addressBarBounds,
+           &addressBarBounds, srcCopy, NULL);
+  UnlockPixels(srcPixMap);
 }
 
 void QuickDrawRenderer::setAddressBarFocused(bool focused) {
@@ -608,20 +749,28 @@ void QuickDrawRenderer::copyGWorldToWindow() {
 
   SetPortWindowPort(window_);
   CGrafPtr winPort = GetWindowPort(window_);
-  PixMapHandle pixMap = GetGWorldPixMap(gWorld_);
+  PixMapHandle pm = GetGWorldPixMap(gWorld_);
 
-  if (LockPixels(pixMap)) {
-    Rect bounds;
-    bounds.left = 0;
-    bounds.top = 0;
-    bounds.right = width_;
-    bounds.bottom = height_;
+  if (LockPixels(pm)) {
+    const int kScrollBarWidth = 16;  // Standard Mac OS scrollbar width
 
-    BitMap *srcMap = (BitMap *)*pixMap;
-    BitMap *dstMap = (BitMap *)GetPortBitMapForCopyBits(winPort);
+    Rect srcBounds;
+    srcBounds.left = 0;
+    srcBounds.top = 0;
+    srcBounds.right = width_;
+    srcBounds.bottom = height_;
 
-    CopyBits(srcMap, dstMap, &bounds, &bounds, srcCopy, NULL);
-    UnlockPixels(pixMap);
+    // Destination rect excludes scrollbar areas (16px on right and bottom)
+    Rect dstBounds;
+    dstBounds.left = 0;
+    dstBounds.top = 0;
+    dstBounds.right = width_ - kScrollBarWidth;   // Exclude vertical scrollbar
+    dstBounds.bottom = height_ - kScrollBarWidth;  // Exclude horizontal scrollbar
+
+    // Use GetPortBitMapForCopyBits - this is what worked in the original version
+    CopyBits((BitMap *)*pm, GetPortBitMapForCopyBits(winPort), &srcBounds, &dstBounds,
+             srcCopy, NULL);
+    UnlockPixels(pm);
   }
 }
 
@@ -634,11 +783,6 @@ void QuickDrawRenderer::renderFrame(PrimitiveStore &store) {
   GetGWorld(&origPort, &origDev);
   SetGWorld(gWorld_, NULL);
 
-  hasLastText_ = false;
-  lastTextY_ = -9999;
-  lastPenX_ = -9999;
-  lastChromiumEnd_ = -9999;
-
   clearScreen();
 
   // Set clip region to viewport (classic Mac approach for culling)
@@ -650,80 +794,119 @@ void QuickDrawRenderer::renderFrame(PrimitiveStore &store) {
   clipRect.right = width_;
   ClipRect(&clipRect);
 
-  // Iterate z-index buckets directly (no allocation overhead)
-  const ZIndexMap &primitivesByZ = store.getPrimitivesByZIndex();
+  // CRITICAL FIX: Render by PRIMITIVE TYPE to ensure proper layering.
+  // Backgrounds must render first, then borders, then text on top.
+  // Rendering in pure document order causes backgrounds to cover text.
+  const std::vector<PrimitivePtr> &allPrimitives = store.getPrimitives();
+
   int rectCount = 0, textCount = 0, borderCount = 0, imageCount = 0;
+  int skippedText = 0;
 
-  for (ZIndexMap::const_iterator zIt = primitivesByZ.begin(); zIt != primitivesByZ.end(); ++zIt) {
-    const PrimitiveBucket &bucket = zIt->second;
-    for (size_t i = 0; i < bucket.size(); i++) {
-      PrimitivePtr prim = bucket[i];
-      if (!prim)
-        continue;
+  std::cout << "[DEBUG] renderFrame: Total primitives to render: " << allPrimitives.size() << std::endl;
 
-      int localY = 0;
-      switch (prim->type) {
-    case PrimitiveType_DrawRect: {
+  // PASS 1: Render all backgrounds (DrawRect)
+  for (size_t i = 0; i < allPrimitives.size(); i++) {
+    PrimitivePtr prim = allPrimitives[i];
+    if (!prim || prim->type != PrimitiveType_DrawRect)
+      continue;
+
       DrawRectPrimitive *p = (DrawRectPrimitive *)prim;
-      localY = p->y - scrollY_ + ADDRESS_BAR_HEIGHT;
+      int localX = p->x - scrollX_;
+      int localY = p->y - scrollY_ + ADDRESS_BAR_HEIGHT;
 
       Color color =
           (p->isHovered && p->hasHoverColor) ? p->hoverColor : p->color;
-      drawRect(p->x, localY, p->width, p->height, color, p->borderRadius);
+      drawRect(localX, localY, p->width, p->height, color, p->borderRadius);
       rectCount++;
-      break;
-    }
-    case PrimitiveType_DrawText: {
+  }
+
+  // PASS 2: Render all borders (DrawBorder)
+  for (size_t i = 0; i < allPrimitives.size(); i++) {
+    PrimitivePtr prim = allPrimitives[i];
+    if (!prim || prim->type != PrimitiveType_DrawBorder)
+      continue;
+
+      DrawBorderPrimitive *p = (DrawBorderPrimitive *)prim;
+      int localX = p->x - scrollX_;
+      int localY = p->y - scrollY_ + ADDRESS_BAR_HEIGHT;
+
+      drawBorder(localX, localY, p->width, p->height, p->thickness, p->color,
+                 p->borderRadius);
+      borderCount++;
+  }
+
+  // PASS 3: Render all text (DrawText) - ON TOP
+  for (size_t i = 0; i < allPrimitives.size(); i++) {
+    PrimitivePtr prim = allPrimitives[i];
+    if (!prim || prim->type != PrimitiveType_DrawText)
+      continue;
+
       DrawTextPrimitive *p = (DrawTextPrimitive *)prim;
-      localY = p->y - scrollY_ + ADDRESS_BAR_HEIGHT;
+      int localX = p->x - scrollX_;
+      int localY = p->y - scrollY_ + ADDRESS_BAR_HEIGHT;
 
       Color color =
           (p->isHovered && p->hasHoverColor) ? p->hoverColor : p->color;
       bool underline = p->isUnderline || (p->isHovered && p->hoverUnderline);
       const std::string &textToDraw =
           p->macRomanText.empty() ? p->text : p->macRomanText;
-      drawText(p->x, localY, textToDraw, p->fontId, p->fontSize, color,
-               p->isBold, p->isItalic, underline, p->maxWidth);
+      drawText(localX, localY, textToDraw, p->fontId, p->fontSize, color,
+               p->isBold, p->isItalic, underline, p->width);  // Use actual DOMSnapshot width
       textCount++;
-      break;
-    }
-    case PrimitiveType_DrawBorder: {
-      DrawBorderPrimitive *p = (DrawBorderPrimitive *)prim;
-      localY = p->y - scrollY_ + ADDRESS_BAR_HEIGHT;
+  }
 
-      drawBorder(p->x, localY, p->width, p->height, p->thickness, p->color,
-                 p->borderRadius);
-      borderCount++;
-      break;
-    }
-    case PrimitiveType_DrawImage: {
-      DrawImagePrimitive *p = (DrawImagePrimitive *)prim;
-      localY = p->y - scrollY_ + ADDRESS_BAR_HEIGHT;
+  // PASS 4: Render all images (DrawImage, DrawMaskedImage) - ON TOP
+  // VIEWPORT CULLING: Skip images outside viewport to avoid blocking PICT decodes
+  int skippedImages = 0;
+  for (size_t i = 0; i < allPrimitives.size(); i++) {
+    PrimitivePtr prim = allPrimitives[i];
+    if (!prim)
+      continue;
 
-      drawImage(p->x, localY, p->width, p->height, p->pictBytes, &p->hPict);
-      imageCount++;
-      break;
-    }
-    case PrimitiveType_DrawMaskedImage: {
-      DrawMaskedImagePrimitive *p = (DrawMaskedImagePrimitive *)prim;
-      localY = p->y - scrollY_ + ADDRESS_BAR_HEIGHT;
+      int localY = 0;
+      switch (prim->type) {
+      case PrimitiveType_DrawImage: {
+        DrawImagePrimitive *p = (DrawImagePrimitive *)prim;
+        int localX = p->x - scrollX_;
+        localY = p->y - scrollY_ + ADDRESS_BAR_HEIGHT;
 
-      std::cout << "[DEBUG] DrawMaskedImage: pos=(" << p->x << "," << localY
-                << ") size=" << p->width << "x" << p->height << " color=("
-                << (int)p->fillColor.r << "," << (int)p->fillColor.g << ","
-                << (int)p->fillColor.b << ")"
-                << " maskBytes=" << p->maskData.size() << std::endl;
+        // Skip images outside viewport (with 100px buffer for smooth scrolling)
+        // This prevents decoding dozens of off-screen images that would freeze the UI
+        if (localY + p->height < ADDRESS_BAR_HEIGHT - 100 || localY > height_ + 100) {
+          skippedImages++;
+          break;
+        }
 
-      drawMaskedImage(p->x, localY, p->width, p->height, p->fillColor,
-                      p->maskData);
-      imageCount++; // Count as image for stats
-      break;
-    }
-    case PrimitiveType_RemovePrimitive:
-      break;
-    }
-    }  // End bucket iteration
-  }  // End zIndex iteration
+        drawImage(localX, localY, p->width, p->height, p->pictBytes, &p->hPict);
+        imageCount++;
+        break;
+      }
+      case PrimitiveType_DrawMaskedImage: {
+        DrawMaskedImagePrimitive *p = (DrawMaskedImagePrimitive *)prim;
+        int localX = p->x - scrollX_;
+        localY = p->y - scrollY_ + ADDRESS_BAR_HEIGHT;
+
+        // Skip masked images outside viewport too
+        if (localY + p->height < ADDRESS_BAR_HEIGHT - 100 || localY > height_ + 100) {
+          skippedImages++;
+          break;
+        }
+
+        std::cout << "[DEBUG] DrawMaskedImage: pos=(" << localX << "," << localY
+                  << ") size=" << p->width << "x" << p->height << " color=("
+                  << (int)p->fillColor.r << "," << (int)p->fillColor.g << ","
+                  << (int)p->fillColor.b << ")"
+                  << " maskBytes=" << p->maskData.size() << std::endl;
+
+        drawMaskedImage(localX, localY, p->width, p->height, p->fillColor,
+                        p->maskData);
+        imageCount++; // Count as image for stats
+        break;
+      }
+      default:
+        break;
+      }
+  }
 
   // Reset clip region to full window for address bar (which is above viewport)
   Rect fullRect;
@@ -737,190 +920,23 @@ void QuickDrawRenderer::renderFrame(PrimitiveStore &store) {
   // GWorld
   drawAddressBar();
 
-  std::cout << "[DEBUG] Rendered: " << rectCount << " rects, " << textCount
-            << " texts, " << borderCount << " borders, " << imageCount
-            << " images" << std::endl;
+  std::cout << "[DEBUG] renderFrame complete:" << std::endl;
+  std::cout << "  - Total primitives: " << allPrimitives.size() << std::endl;
+  std::cout << "  - Rendered: " << rectCount << " rects, " << textCount << " texts, "
+            << borderCount << " borders, " << imageCount << " images" << std::endl;
+  std::cout << "  - Skipped: " << skippedText << " texts, " << skippedImages << " images (viewport culling)" << std::endl;
+  std::cout << "  - NOTE: Check above for EMPTY TEXT or WHITE TEXT warnings" << std::endl;
 
   lastRenderedScrollY_ = scrollY_; // Track scroll position of this render
+  lastRenderedScrollX_ = scrollX_;
 
   SetGWorld(origPort, origDev);
 
   // Blit GWorld double-buffer to Carbon Window
   copyGWorldToWindow();
-}
 
-// DIFFERENTIAL RENDERING - Only draws what changed!
-// This is THE performance optimization that makes Mac OS 9 fast on complex
-// pages
-void QuickDrawRenderer::renderDiff(const FrameUpdate &update,
-                                   PrimitiveStore &store) {
-  if (!gWorld_ || !window_)
-    return;
-
-  // CRITICAL: If scroll position changed since last render, we MUST do a full
-  // redraw Otherwise we'd paint primitives at wrong Y offsets over the
-  // locally-scrolled view
-  if (scrollY_ != lastRenderedScrollY_) {
-    std::cout << "[DEBUG] Scroll changed (" << lastRenderedScrollY_ << " -> "
-              << scrollY_ << "), falling back to full renderFrame()"
-              << std::endl;
-    renderFrame(store);
-    return;
-  }
-
-  // CRITICAL: If update has 0 primitives, there's nothing to render differentially
-  // Fall back to full renderFrame() to ensure screen isn't blank
-  if (update.primitiveCount == 0) {
-    std::cout << "[DEBUG] Empty diff (0 primitives), falling back to full renderFrame()"
-              << std::endl;
-    renderFrame(store);
-    return;
-  }
-
-  CGrafPtr origPort;
-  GDHandle origDev;
-  GetGWorld(&origPort, &origDev);
-  SetGWorld(gWorld_, NULL);
-
-  hasLastText_ = false;
-  lastTextY_ = -9999;
-  lastPenX_ = -9999;
-  lastChromiumEnd_ = -9999;
-
-  // DON'T clearScreen() - keep existing pixels intact (differential rendering!)
-
-  // Set clip region to viewport (classic Mac approach for culling)
-  Rect clipRect;
-  clipRect.top = ADDRESS_BAR_HEIGHT;
-  clipRect.left = 0;
-  clipRect.bottom = height_;
-  clipRect.right = width_;
-  ClipRect(&clipRect);
-
-  int addedCount = 0, changedCount = 0, removedCount = 0;
-
-  // Step 1: Erase removed primitives (draw white rectangles over them)
-  RGBColor white = {0xFFFF, 0xFFFF, 0xFFFF};
-  for (size_t i = 0; i < update.primitiveCount; i++) {
-    PrimitivePtr prim = update.primitives[i];
-    if (!prim)
-      continue;
-
-    if (prim->type == PrimitiveType_RemovePrimitive) {
-      RemovePrimitive *p = (RemovePrimitive *)prim;
-      // Erase by drawing white rect
-      // Note: We don't have the bounds, so we'd need to track this.
-      // For now, skip removal erasing - full redraws will clean them up
-      removedCount++;
-      continue;
-    }
-  }
-
-  // Step 2 & 3: Draw added and changed primitives
-  for (size_t i = 0; i < update.primitiveCount; i++) {
-    PrimitivePtr prim = update.primitives[i];
-    if (!prim)
-      continue;
-
-    int localY = 0;
-
-    switch (prim->type) {
-    case PrimitiveType_DrawRect: {
-      DrawRectPrimitive *p = (DrawRectPrimitive *)prim;
-      localY = p->y - scrollY_ + ADDRESS_BAR_HEIGHT;
-
-      // Erase old version first (for changed primitives)
-      RGBForeColor(&white);
-      Rect eraseRect;
-      eraseRect.left = p->x;
-      eraseRect.top = localY;
-      eraseRect.right = p->x + p->width;
-      eraseRect.bottom = localY + p->height;
-      PaintRect(&eraseRect);
-
-      // Draw new version
-      Color color =
-          (p->isHovered && p->hasHoverColor) ? p->hoverColor : p->color;
-      drawRect(p->x, localY, p->width, p->height, color, p->borderRadius);
-      addedCount++;
-      break;
-    }
-    case PrimitiveType_DrawText: {
-      DrawTextPrimitive *p = (DrawTextPrimitive *)prim;
-      localY = p->y - scrollY_ + ADDRESS_BAR_HEIGHT;
-
-      // Erase old text (approximate bounds)
-      RGBForeColor(&white);
-      Rect eraseRect;
-      eraseRect.left = p->x;
-      eraseRect.top = localY;
-      eraseRect.right = p->x + (p->maxWidth > 0 ? p->maxWidth : 500);
-      eraseRect.bottom = localY + p->fontSize + 4;
-      PaintRect(&eraseRect);
-
-      // Draw new text
-      Color color =
-          (p->isHovered && p->hasHoverColor) ? p->hoverColor : p->color;
-      bool underline = p->isUnderline || (p->isHovered && p->hoverUnderline);
-      const std::string &textToDraw =
-          p->macRomanText.empty() ? p->text : p->macRomanText;
-      drawText(p->x, localY, textToDraw, p->fontId, p->fontSize, color,
-               p->isBold, p->isItalic, underline, p->maxWidth);
-      addedCount++;
-      break;
-    }
-    case PrimitiveType_DrawBorder: {
-      DrawBorderPrimitive *p = (DrawBorderPrimitive *)prim;
-      localY = p->y - scrollY_ + ADDRESS_BAR_HEIGHT;
-
-      drawBorder(p->x, localY, p->width, p->height, p->thickness, p->color,
-                 p->borderRadius);
-      addedCount++;
-      break;
-    }
-    case PrimitiveType_DrawImage: {
-      DrawImagePrimitive *p = (DrawImagePrimitive *)prim;
-      localY = p->y - scrollY_ + ADDRESS_BAR_HEIGHT;
-
-      drawImage(p->x, localY, p->width, p->height, p->pictBytes, &p->hPict);
-      addedCount++;
-      break;
-    }
-    case PrimitiveType_DrawMaskedImage: {
-      DrawMaskedImagePrimitive *p = (DrawMaskedImagePrimitive *)prim;
-      localY = p->y - scrollY_ + ADDRESS_BAR_HEIGHT;
-
-      drawMaskedImage(p->x, localY, p->width, p->height, p->fillColor,
-                      p->maskData);
-      addedCount++;
-      break;
-    }
-    case PrimitiveType_RemovePrimitive:
-      break;
-    }
-  }
-
-  // Reset clip region to full window for address bar (which is above viewport)
-  Rect fullRect;
-  fullRect.top = 0;
-  fullRect.left = 0;
-  fullRect.bottom = height_;
-  fullRect.right = width_;
-  ClipRect(&fullRect);
-
-  // Always redraw address bar (it's sticky/fixed)
-  drawAddressBar();
-
-  std::cout << "[DEBUG] Diff render: +" << addedCount << " -" << removedCount
-            << " (skipped full redraw of " << store.size() << " primitives)"
-            << std::endl;
-
-  lastRenderedScrollY_ = scrollY_; // Track scroll position of this render
-
-  SetGWorld(origPort, origDev);
-
-  // Blit GWorld to window
-  copyGWorldToWindow();
+  // Update scrollbar positions to match current scroll
+  updateScrollBars();
 }
 
 // SMART SCROLLING - Hardware-accelerated CopyBits + render only new strip
@@ -969,8 +985,9 @@ void QuickDrawRenderer::smartScroll(int newScrollY, PrimitiveStore &store) {
   ClipRect(&clipRect);
 
   // Step 4: Render ONLY primitives in the newly revealed strip
-  // Iterate z-index buckets directly (no allocation overhead)
-  const ZIndexMap &primitivesByZ = store.getPrimitivesByZIndex();
+  // Use primitives in server order (document order)
+  const std::vector<PrimitivePtr> &allPrimitives = store.getPrimitives();
+
   int renderedCount = 0;
 
   // Determine the Y range of the newly revealed strip (in document coordinates)
@@ -986,94 +1003,97 @@ void QuickDrawRenderer::smartScroll(int newScrollY, PrimitiveStore &store) {
     stripMaxY = scrollY_ + (-deltaY) + 50;
   }
 
-  for (ZIndexMap::const_iterator zIt = primitivesByZ.begin(); zIt != primitivesByZ.end(); ++zIt) {
-    const PrimitiveBucket &bucket = zIt->second;
-    for (size_t i = 0; i < bucket.size(); i++) {
-      PrimitivePtr prim = bucket[i];
-      if (!prim)
-        continue;
+  // Render primitives in document order
+  for (size_t i = 0; i < allPrimitives.size(); i++) {
+    PrimitivePtr prim = allPrimitives[i];
+    if (!prim)
+      continue;
 
       int localY = 0;
 
       switch (prim->type) {
-    case PrimitiveType_DrawRect: {
-      DrawRectPrimitive *p = (DrawRectPrimitive *)prim;
+      case PrimitiveType_DrawRect: {
+        DrawRectPrimitive *p = (DrawRectPrimitive *)prim;
 
-      // Check if primitive is in the newly revealed strip
-      if (p->y < stripMinY || p->y > stripMaxY)
+        // Check if primitive is in the newly revealed strip
+        if (p->y < stripMinY || p->y > stripMaxY)
+          break;
+
+        int localX = p->x - scrollX_;
+        localY = p->y - scrollY_ + ADDRESS_BAR_HEIGHT;
+        if (localY + p->height < ADDRESS_BAR_HEIGHT || localY > height_)
+          break;
+
+        Color color =
+            (p->isHovered && p->hasHoverColor) ? p->hoverColor : p->color;
+        drawRect(localX, localY, p->width, p->height, color, p->borderRadius);
+        renderedCount++;
         break;
+      }
+      case PrimitiveType_DrawText: {
+        DrawTextPrimitive *p = (DrawTextPrimitive *)prim;
 
-      localY = p->y - scrollY_ + ADDRESS_BAR_HEIGHT;
-      if (localY + p->height < ADDRESS_BAR_HEIGHT || localY > height_)
+        if (p->y < stripMinY || p->y > stripMaxY)
+          break;
+
+        int localX = p->x - scrollX_;
+        localY = p->y - scrollY_ + ADDRESS_BAR_HEIGHT;
+
+        Color color =
+            (p->isHovered && p->hasHoverColor) ? p->hoverColor : p->color;
+        bool underline = p->isUnderline || (p->isHovered && p->hoverUnderline);
+        const std::string &textToDraw =
+            p->macRomanText.empty() ? p->text : p->macRomanText;
+        drawText(localX, localY, textToDraw, p->fontId, p->fontSize, color,
+                 p->isBold, p->isItalic, underline, p->width);  // Use actual DOMSnapshot width
+        renderedCount++;
         break;
+      }
+      case PrimitiveType_DrawBorder: {
+        DrawBorderPrimitive *p = (DrawBorderPrimitive *)prim;
 
-      Color color =
-          (p->isHovered && p->hasHoverColor) ? p->hoverColor : p->color;
-      drawRect(p->x, localY, p->width, p->height, color, p->borderRadius);
-      renderedCount++;
-      break;
-    }
-    case PrimitiveType_DrawText: {
-      DrawTextPrimitive *p = (DrawTextPrimitive *)prim;
+        if (p->y < stripMinY || p->y > stripMaxY)
+          break;
 
-      if (p->y < stripMinY || p->y > stripMaxY)
+        int localX = p->x - scrollX_;
+        localY = p->y - scrollY_ + ADDRESS_BAR_HEIGHT;
+
+        drawBorder(localX, localY, p->width, p->height, p->thickness, p->color,
+                   p->borderRadius);
+        renderedCount++;
         break;
+      }
+      case PrimitiveType_DrawImage: {
+        DrawImagePrimitive *p = (DrawImagePrimitive *)prim;
 
-      localY = p->y - scrollY_ + ADDRESS_BAR_HEIGHT;
+        if (p->y < stripMinY || p->y > stripMaxY)
+          break;
 
-      Color color =
-          (p->isHovered && p->hasHoverColor) ? p->hoverColor : p->color;
-      bool underline = p->isUnderline || (p->isHovered && p->hoverUnderline);
-      const std::string &textToDraw =
-          p->macRomanText.empty() ? p->text : p->macRomanText;
-      drawText(p->x, localY, textToDraw, p->fontId, p->fontSize, color,
-               p->isBold, p->isItalic, underline, p->maxWidth);
-      renderedCount++;
-      break;
-    }
-    case PrimitiveType_DrawBorder: {
-      DrawBorderPrimitive *p = (DrawBorderPrimitive *)prim;
+        int localX = p->x - scrollX_;
+        localY = p->y - scrollY_ + ADDRESS_BAR_HEIGHT;
 
-      if (p->y < stripMinY || p->y > stripMaxY)
+        drawImage(localX, localY, p->width, p->height, p->pictBytes, &p->hPict);
+        renderedCount++;
         break;
+      }
+      case PrimitiveType_DrawMaskedImage: {
+        DrawMaskedImagePrimitive *p = (DrawMaskedImagePrimitive *)prim;
 
-      localY = p->y - scrollY_ + ADDRESS_BAR_HEIGHT;
+        if (p->y < stripMinY || p->y > stripMaxY)
+          break;
 
-      drawBorder(p->x, localY, p->width, p->height, p->thickness, p->color,
-                 p->borderRadius);
-      renderedCount++;
-      break;
-    }
-    case PrimitiveType_DrawImage: {
-      DrawImagePrimitive *p = (DrawImagePrimitive *)prim;
+        int localX = p->x - scrollX_;
+        localY = p->y - scrollY_ + ADDRESS_BAR_HEIGHT;
 
-      if (p->y < stripMinY || p->y > stripMaxY)
+        drawMaskedImage(localX, localY, p->width, p->height, p->fillColor,
+                        p->maskData);
+        renderedCount++;
         break;
-
-      localY = p->y - scrollY_ + ADDRESS_BAR_HEIGHT;
-
-      drawImage(p->x, localY, p->width, p->height, p->pictBytes, &p->hPict);
-      renderedCount++;
-      break;
-    }
-    case PrimitiveType_DrawMaskedImage: {
-      DrawMaskedImagePrimitive *p = (DrawMaskedImagePrimitive *)prim;
-
-      if (p->y < stripMinY || p->y > stripMaxY)
+      }
+      default:
         break;
-
-      localY = p->y - scrollY_ + ADDRESS_BAR_HEIGHT;
-
-      drawMaskedImage(p->x, localY, p->width, p->height, p->fillColor,
-                      p->maskData);
-      renderedCount++;
-      break;
-    }
-    default:
-      break;
-    }
-    }  // End bucket iteration
-  }  // End zIndex iteration
+      }
+    } // End primitive iteration
 
   // Reset clip region to full window for address bar (which is above viewport)
   Rect fullRect;
@@ -1095,6 +1115,7 @@ void QuickDrawRenderer::smartScroll(int newScrollY, PrimitiveStore &store) {
   DisposeRgn(updateRgn);
   SetGWorld(origPort, origDev);
   copyGWorldToWindow();
+  updateScrollBars();
 }
 
 void QuickDrawRenderer::scrollViewport(int deltaY) {
@@ -1118,8 +1139,155 @@ void QuickDrawRenderer::scrollViewport(int deltaY) {
   DisposeRgn(updateRgn);
 
   SetGWorld(origPort, origDev);
-
   copyGWorldToWindow();
+}
+
+void QuickDrawRenderer::createScrollBars() {
+  if (!window_) return;
+
+  const int kScrollBarWidth = 16;  // Standard Mac OS scrollbar width
+
+  // Vertical scrollbar (right side, below address bar, above horizontal scrollbar)
+  Rect vScrollRect;
+  vScrollRect.left = width_ - kScrollBarWidth;
+  vScrollRect.top = ADDRESS_BAR_HEIGHT;
+  vScrollRect.right = width_;
+  vScrollRect.bottom = height_ - kScrollBarWidth + 1;  // Leave room for horizontal scrollbar
+
+  vScrollBar_ = NewControl(window_, &vScrollRect, "\p", true, 0, 0, 100, scrollBarProc, 0);
+
+  // Horizontal scrollbar (bottom, left of vertical scrollbar)
+  Rect hScrollRect;
+  hScrollRect.left = 0;
+  hScrollRect.top = height_ - kScrollBarWidth;
+  hScrollRect.right = width_ - kScrollBarWidth + 1;  // Leave room for vertical scrollbar
+  hScrollRect.bottom = height_;
+
+  hScrollBar_ = NewControl(window_, &hScrollRect, "\p", true, 0, 0, 100, scrollBarProc, 0);
+
+  std::cout << "[QuickDraw] Created native scrollbars" << std::endl;
+}
+
+void QuickDrawRenderer::updateScrollBars() {
+  if (!vScrollBar_ || !hScrollBar_) return;
+
+  // Update scrollbar thumb positions (max values should be set by updateScrollBarsWithDocumentSize)
+  SetControlValue(vScrollBar_, scrollY_);
+  SetControlValue(hScrollBar_, scrollX_);
+}
+
+void QuickDrawRenderer::updateScrollBarsWithDocumentSize(int docWidth, int docHeight, int viewportWidth, int viewportHeight) {
+  if (!vScrollBar_ || !hScrollBar_) return;
+
+  // Calculate maximum scrollable distance
+  // Max scroll = document size - viewport size (but never negative)
+  int maxScrollY = docHeight - viewportHeight;
+  if (maxScrollY < 0) maxScrollY = 0;
+
+  int maxScrollX = docWidth - viewportWidth;
+  if (maxScrollX < 0) maxScrollX = 0;
+
+  // Update scrollbar ranges
+  SetControlMaximum(vScrollBar_, maxScrollY);
+  SetControlMaximum(hScrollBar_, maxScrollX);
+
+  // Update current positions
+  SetControlValue(vScrollBar_, scrollY_);
+  SetControlValue(hScrollBar_, scrollX_);
+
+  std::cout << "[QuickDraw] Updated scrollbar ranges: vMax=" << maxScrollY
+            << " hMax=" << maxScrollX << std::endl;
+}
+
+bool QuickDrawRenderer::handleResize(int newWidth, int newHeight) {
+  if (!window_) {
+    std::cerr << "[QuickDraw] handleResize: no window" << std::endl;
+    return false;
+  }
+
+  // Validate dimensions (minimum 640x480, maximum 1600x1200 for Mac OS 9 memory constraints)
+  if (newWidth < 640 || newHeight < 480) {
+    std::cout << "[QuickDraw] Resize too small: " << newWidth << "x" << newHeight << " (min 640x480)" << std::endl;
+    return false;
+  }
+  if (newWidth > 1600 || newHeight > 1200) {
+    std::cout << "[QuickDraw] Resize too large: " << newWidth << "x" << newHeight << " (max 1600x1200)" << std::endl;
+    return false;
+  }
+
+  // No change needed
+  if (newWidth == width_ && newHeight == height_) {
+    return false;
+  }
+
+  std::cout << "[QuickDraw] Resizing from " << width_ << "x" << height_
+            << " to " << newWidth << "x" << newHeight << std::endl;
+
+  // Step 1: Create new GWorld at new size
+  Rect gRect;
+  gRect.left = 0;
+  gRect.top = 0;
+  gRect.right = newWidth;
+  gRect.bottom = newHeight;
+
+  GWorldPtr newGWorld;
+  QDErr err = NewGWorld(&newGWorld, 0, &gRect, NULL, NULL, 0);
+  if (err != noErr || !newGWorld) {
+    std::cerr << "[QuickDraw] Failed to create new GWorld: error " << err << std::endl;
+    return false;
+  }
+
+  std::cout << "[QuickDraw] Created new GWorld successfully" << std::endl;
+
+  // Step 2: Set up new GWorld's drawing context
+  CGrafPtr origPort;
+  GDHandle origDev;
+  GetGWorld(&origPort, &origDev);
+  SetGWorld(newGWorld, NULL);
+
+  // Initialize drawing state
+  PenNormal();
+  RGBColor black = {0x0000, 0x0000, 0x0000};
+  RGBForeColor(&black);
+  RGBColor white = {0xFFFF, 0xFFFF, 0xFFFF};
+  RGBBackColor(&white);
+
+  // Clear to white
+  Rect clearRect;
+  clearRect.left = 0;
+  clearRect.top = 0;
+  clearRect.right = newWidth;
+  clearRect.bottom = newHeight;
+  EraseRect(&clearRect);
+
+  SetGWorld(origPort, origDev);
+
+  // Step 3: Dispose old GWorld and swap to new one
+  if (gWorld_) {
+    DisposeGWorld(gWorld_);
+  }
+  gWorld_ = newGWorld;
+
+  // Step 4: Update dimensions
+  width_ = newWidth;
+  height_ = newHeight;
+
+  // Step 5: Reposition and resize scrollbars
+  const int kScrollBarWidth = 16;
+
+  if (vScrollBar_) {
+    MoveControl(vScrollBar_, width_ - kScrollBarWidth, ADDRESS_BAR_HEIGHT);
+    SizeControl(vScrollBar_, kScrollBarWidth, height_ - ADDRESS_BAR_HEIGHT - kScrollBarWidth + 1);
+  }
+
+  if (hScrollBar_) {
+    MoveControl(hScrollBar_, 0, height_ - kScrollBarWidth);
+    SizeControl(hScrollBar_, width_ - kScrollBarWidth + 1, kScrollBarWidth);
+  }
+
+  std::cout << "[QuickDraw] Resize complete, scrollbars repositioned" << std::endl;
+
+  return true;
 }
 
 } // namespace mochila

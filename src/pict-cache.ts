@@ -33,7 +33,7 @@ export class PictImageCache {
     return this.cache.has(key);
   }
 
-  async get(url: string, maxPhotoDimension: number, maskColor?: string, backgroundColor?: string): Promise<PictEncodeResult> {
+  async get(url: string, maxPhotoDimension: number, maskColor?: string, backgroundColor?: string, page?: any): Promise<PictEncodeResult> {
     const key = `${url}:${maxPhotoDimension}:${maskColor || 'none'}:${backgroundColor || 'none'}`;
     const cached = this.cache.get(key);
 
@@ -72,7 +72,7 @@ export class PictImageCache {
     }
 
     // Cache miss: initiate encoding using the injected encoder
-    const promise = this.encoder(url, maxPhotoDimension, maskColor, backgroundColor);
+    const promise = this.encoder(url, maxPhotoDimension, maskColor, backgroundColor, page);
     this.pending.set(key, promise);
     this.misses++;
 

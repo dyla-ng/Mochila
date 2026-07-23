@@ -1,5 +1,5 @@
 /**
- * Live server for Step 5.5 client testing
+ * Live server for Carbon client
  *
  * Full pipeline integration:
  * - Step 1: Playwright primitive extraction
@@ -22,6 +22,7 @@ import {
 import {
   buildFrameUpdate,
   serializeFrameUpdate,
+  serializeImageData,
   deserializeFrameAck,
   deserializeClick,
   deserializeNavigateCommand,
@@ -30,15 +31,18 @@ import {
   deserializeMouseEnter,
   deserializeMouseLeave,
 } from './wire-protocol';
+import * as crypto from 'crypto';
 import { PlaywrightBlocker } from '@ghostery/adblocker-playwright';
 import fetch from 'cross-fetch';
 import { pictCache } from './pict-cache';
 import { ExtractionPipeline } from './pipeline';
 import { rawBytesCache } from './raw-bytes-cache';
+// import { injectMacOS9Fonts, testFontInjection } from './font-injector'; // DISABLED
 
 
 interface ClientEvent {
-  type: 'scroll' | 'init' | 'click' | 'navigate' | 'keyInput' | 'mouseEnter' | 'mouseLeave';
+  type: 'scroll' | 'init' | 'click' | 'navigate' | 'keyInput' | 'mouseEnter' | 'mouseLeave' | 'resize';
+  scrollX?: number;
   scrollY?: number;
   scrollSeq?: number;  // Sequence number for scroll events
   deltaY?: number;
@@ -47,6 +51,8 @@ interface ClientEvent {
   action?: number;
   isText?: boolean;
   text?: string;
+  width?: number;   // For resize events
+  height?: number;  // For resize events
 }
 
 export class LiveSession {
@@ -64,26 +70,100 @@ export class LiveSession {
   };
   private frameSendTimes = new Map<number, number>();
   private sentImages = new Set<string>();
+  private sentImageData = new Set<string>();  // Track sent ImageData by imageId
   private pendingEvents: ClientEvent[] = [];
   private processingEvent: boolean = false;
   private scrollMetadata: any = null;
   private lastProcessedScrollSeq: number = 0;  // Track last processed client scroll sequence
 
+  private lastCacheUpdateSend: number = 0;
+  private lastCacheUpdateFoundImages: boolean = false;
+
   constructor(ws: WebSocket) {
     this.ws = ws;
+    // Cache update callback - sends freshly encoded images via ImageData
     pictCache.onCacheUpdate = () => {
-      this.debouncedTriggerUpdate();
+      const now = Date.now();
+      const timeSinceLastSend = now - this.lastCacheUpdateSend;
+
+      // Always try if last attempt found 0 images (might be too early)
+      // Otherwise throttle to 100ms to batch rapid encoding completions
+      const shouldSend = !this.lastCacheUpdateFoundImages || timeSinceLastSend > 100;
+
+      if (shouldSend) {
+        this.lastCacheUpdateSend = now;
+        console.log('[Server] onCacheUpdate triggered, calling sendCachedImagesNow...');
+        this.sendCachedImagesNow().catch((err) => {
+          console.error('[Server] Error in sendCachedImagesNow:', err);
+        });
+      } else {
+        console.log(`[Server] onCacheUpdate throttled (${timeSinceLastSend}ms since last send)`);
+      }
     };
   }
 
-  async init(url: string) {
-    console.log(`[Server] Initializing browser for ${url}`);
+  private async sendCachedImagesNow() {
+    if (!this.currentFrame) {
+      console.log('[Server] sendCachedImagesNow: no currentFrame, skipping');
+      return;
+    }
+
+    console.log(`[Server] sendCachedImagesNow: checking ${this.currentFrame.length} primitives for newly encoded images...`);
+
+    // Find images that haven't been sent yet
+    const imagesToSend: PrimitiveWithIdentity[] = [];
+    let imageCount = 0;
+    let alreadySentCount = 0;
+    let notCachedCount = 0;
+
+    for (const prim of this.currentFrame) {
+      if (prim.type === PrimitiveType.DrawImage) {
+        imageCount++;
+        const src = (prim as any).src;
+        if (!src) continue;
+
+        const imageId = crypto.createHash('sha256').update(src).digest('hex').substring(0, 16);
+
+        // Skip if already sent
+        if (this.sentImageData.has(imageId)) {
+          alreadySentCount++;
+          continue;
+        }
+
+        // Check if cache has this image now
+        if (pictCache.has(src, 1024, undefined, undefined)) {
+          // Get from cache and create a temporary primitive with pictBytes for sending
+          const cached = await pictCache.get(src, 1024, undefined, undefined);
+          const primWithBytes = {
+            ...prim,
+            pictBytes: cached.pictBytes,
+          };
+          imagesToSend.push(primWithBytes as any);
+        } else {
+          notCachedCount++;
+        }
+      }
+    }
+
+    console.log(`[Server] sendCachedImagesNow: found ${imageCount} total images, ${alreadySentCount} already sent, ${notCachedCount} not cached yet, ${imagesToSend.length} to send now`);
+
+    // Update flag so throttle knows if this attempt was productive
+    this.lastCacheUpdateFoundImages = imagesToSend.length > 0;
+
+    if (imagesToSend.length > 0) {
+      console.log(`[Server] Sending ${imagesToSend.length} newly cached images via ImageData`);
+      await this.sendImageDataAsync(imagesToSend, []);
+    }
+  }
+
+  async init(url: string, viewportWidth: number = 1024, viewportHeight: number = 768) {
+    console.log(`[Server] Initializing browser for ${url} with viewport ${viewportWidth}x${viewportHeight}`);
     this.browser = await chromium.launch({
       headless: true,
       args: ['--disable-web-security', '--disable-features=IsolateOrigins,site-per-process'],
     });
     this.page = await this.browser.newPage({
-      viewport: { width: 1024, height: 768 },
+      viewport: { width: viewportWidth, height: viewportHeight },
     });
 
     // Clear raw image bytes cache on initialization
@@ -126,6 +206,13 @@ export class LiveSession {
     // Additional wait to ensure CSS variables are fully resolved
     await this.page.waitForTimeout(500);
 
+    // DISABLED: Font injection
+    // Let Chrome use native fonts (Arial, Times, Monaco, etc.) so DOMSnapshot
+    // captures the original font-family. The server will classify them and
+    // map to appropriate Mac OS 9 fonts (Geneva, New York, Monaco).
+    // await injectMacOS9Fonts(this.page);
+    // await testFontInjection(this.page);
+
     // Save actual Chrome screenshot asynchronously in background (non-blocking)
     import('path').then(path => {
       import('fs').then(fs => {
@@ -139,17 +226,48 @@ export class LiveSession {
 
     // Extract initial frame immediately
     console.log('[Server] Extracting initial frame');
+
+    // DEBUG: Check actual scroll position before extraction
+    const actualScrollY = await this.page!.evaluate(() => window.scrollY);
+    console.log(`[Server] DEBUG: Actual window.scrollY before extraction: ${actualScrollY}`);
+
     pictCache.clear();
     const startTime = Date.now();
     const result = await ExtractionPipeline.run(this.page!);
     console.log(`[Server] ExtractionPipeline completed in ${Date.now() - startTime}ms`);
+
+    // DEBUG: Check primitives BEFORE addIdentities
+    const textBeforeIdentities = result.primitives.filter(p => p.type === PrimitiveType.DrawText).slice(0, 5);
+    console.log(`[DEBUG] Text primitives BEFORE addIdentities:`);
+    textBeforeIdentities.forEach((p: any, i: number) => {
+      console.log(`  [${i}] y=${p.y} text="${p.text?.substring(0, 30)}"`);
+    });
+
     this.currentFrame = addIdentities(result.primitives);
     this.scrollMetadata = result.scrollMetadata;
 
+    // DEBUG: Check primitives AFTER addIdentities
+    const textAfterIdentities = this.currentFrame.filter(p => p.type === 1).slice(0, 5);
+    console.log(`[DEBUG] Text primitives AFTER addIdentities:`);
+    textAfterIdentities.forEach((p: any, i: number) => {
+      console.log(`  [${i}] y=${p.y} text="${p.text?.substring(0, 30)}"`);
+    });
+
     console.log(`[Server] Initial frame: ${this.currentFrame.length} primitives`);
 
-    // Diagnostic: Log first 20 text primitives to debug wrapping
-    console.log('[DEBUG] First 20 text primitives:');
+    // Diagnostic: Log text primitives by Y position to debug positioning
+    const allTextPrims = this.currentFrame.filter(p => p.type === 1); // DrawText = 1
+    const textByY = [...allTextPrims].sort((a: any, b: any) => a.y - b.y);
+    console.log(`[DEBUG] Text primitives by Y position (first 20):`);
+    for (let i = 0; i < Math.min(20, textByY.length); i++) {
+      const p: any = textByY[i];
+      const textPreview = p.text ? p.text.substring(0, 50) : '[EMPTY]';
+      console.log(`  [${i}] (${p.x},${p.y}) fontSize=${p.fontSize} "${textPreview}"`);
+    }
+    console.log(`[DEBUG] Y range: ${textByY[0]?.y} to ${textByY[textByY.length - 1]?.y}`);
+
+    // OLD diagnostic - Log first 20 text primitives to debug wrapping
+    console.log('[DEBUG] First 20 text primitives (original order):');
     const textPrimitives = result.primitives.filter(p => p.type === PrimitiveType.DrawText).slice(0, 20);
     textPrimitives.forEach((p, idx) => {
       if (p.type === PrimitiveType.DrawText) {
@@ -157,8 +275,9 @@ export class LiveSession {
       }
     });
 
-    // Send initial frame (all added, nothing changed/removed)
-    await this.sendFrame(this.currentFrame, [], []);
+    // Send initial frame (layout + image placeholders)
+    // Images will be sent progressively via cache update mechanism
+    await this.sendFrameBatched(this.currentFrame, [], []);
   }
 
   handleClientEvent(event: ClientEvent) {
@@ -199,7 +318,6 @@ export class LiveSession {
       clearTimeout(this.debounceTimeout);
     }
     this.debounceTimeout = setTimeout(() => {
-      // Only push refresh if there isn't already a scroll or refresh pending to avoid redundant frames
       const hasPending = this.pendingEvents.some(
         e => e.type === 'scroll' || (e as any).type === 'refresh'
       );
@@ -212,23 +330,32 @@ export class LiveSession {
 
   private async processClientEvent(event: ClientEvent) {
     if (event.type === 'scroll') {
+      let targetScrollX: number = 0;
       let targetScrollY: number;
+
+      // Handle scrollX (absolute only for now)
+      if (typeof event.scrollX === 'number') {
+        targetScrollX = event.scrollX;
+      } else {
+        // Default to current X position if not specified
+        targetScrollX = await this.page!.evaluate(() => window.scrollX);
+      }
 
       if (typeof event.deltaY === 'number') {
         // Relative scroll - get current position and add delta
         const currentY = await this.page!.evaluate(() => window.scrollY);
         targetScrollY = Math.max(0, currentY + event.deltaY);
-        console.log(`[Server] Client scroll delta ${event.deltaY}px (${currentY} -> ${targetScrollY}), re-extracting...`);
+        console.log(`[Server] Client scroll delta Y ${event.deltaY}px (${currentY} -> ${targetScrollY}), re-extracting...`);
       } else if (typeof event.scrollY === 'number') {
         // Absolute scroll
         targetScrollY = event.scrollY;
-        console.log(`[Server] Client scroll to ${event.scrollY}px, re-extracting...`);
+        console.log(`[Server] Client scroll to (${targetScrollX}, ${event.scrollY})px, re-extracting...`);
       } else {
         return;
       }
 
-      // Scroll page
-      await this.page!.evaluate((y: number) => window.scrollTo(0, y), targetScrollY);
+      // Scroll page (both X and Y)
+      await this.page!.evaluate(({ x, y }) => window.scrollTo(x, y), { x: targetScrollX, y: targetScrollY });
 
       // Update last processed scroll sequence
       if (typeof event.scrollSeq === 'number') {
@@ -252,7 +379,7 @@ export class LiveSession {
       this.currentFrame = newFrame;
 
       // Send update
-      await this.sendFrame(diff.added, diff.changed, diff.removed, previousFrame);
+      await this.sendFrameBatched(diff.added, diff.changed, diff.removed, previousFrame);
     } else if (event.type === 'click') {
       if (typeof event.x === 'number' && typeof event.y === 'number') {
         console.log(`[Server] Client click at doc (${event.x}, ${event.y}), executing page.mouse.click...`);
@@ -272,7 +399,7 @@ export class LiveSession {
 
         const previousFrame = this.currentFrame;
         this.currentFrame = newFrame;
-        await this.sendFrame(diff.added, diff.changed, diff.removed, previousFrame);
+        await this.sendFrameBatched(diff.added, diff.changed, diff.removed, previousFrame);
       }
     } else if (event.type === 'navigate') {
       if (typeof event.action === 'number') {
@@ -297,7 +424,7 @@ export class LiveSession {
 
         const previousFrame = this.currentFrame;
         this.currentFrame = newFrame;
-        await this.sendFrame(diff.added, diff.changed, diff.removed, previousFrame);
+        await this.sendFrameBatched(diff.added, diff.changed, diff.removed, previousFrame);
       }
     } else if (event.type === 'keyInput') {
       if (typeof event.text === 'string') {
@@ -335,7 +462,7 @@ export class LiveSession {
 
         const previousFrame = this.currentFrame;
         this.currentFrame = newFrame;
-        await this.sendFrame(diff.added, diff.changed, diff.removed, previousFrame);
+        await this.sendFrameBatched(diff.added, diff.changed, diff.removed, previousFrame);
       }
     } else if ((event as any).type === 'refresh') {
       console.log('[Server] Cache updated, re-extracting refreshed frame...');
@@ -348,7 +475,7 @@ export class LiveSession {
         console.log(`[Server] Refresh Diff: +${diff.added.length} -${diff.removed.length} ~${diff.changed.length} =${diff.unchanged.length}`);
         const previousFrame = this.currentFrame;
         this.currentFrame = newFrame;
-        await this.sendFrame(diff.added, diff.changed, diff.removed, previousFrame);
+        await this.sendFrameBatched(diff.added, diff.changed, diff.removed, previousFrame);
       } else {
         console.log('[Server] Refresh extracted frame had no changes, skipping send.');
       }
@@ -365,13 +492,57 @@ export class LiveSession {
           console.log(`[Server] MouseEnter Hover Diff: +${diff.added.length} -${diff.removed.length} ~${diff.changed.length} =${diff.unchanged.length}`);
           const previousFrame = this.currentFrame;
           this.currentFrame = newFrame;
-          await this.sendFrame(diff.added, diff.changed, diff.removed, previousFrame);
+          await this.sendFrameBatched(diff.added, diff.changed, diff.removed, previousFrame);
         }
+      }
+    } else if (event.type === 'resize') {
+      if (typeof event.width === 'number' && typeof event.height === 'number') {
+        console.log(`[Server] Client resized viewport to ${event.width}x${event.height}`);
+
+        // Update Playwright viewport size
+        await this.page!.setViewportSize({ width: event.width, height: event.height });
+
+        // Wait for layout to settle
+        await this.page!.waitForTimeout(100);
+
+        // Re-extract with new dimensions
+        const result = await ExtractionPipeline.run(this.page!);
+        const newFrame = addIdentities(result.primitives);
+        this.scrollMetadata = result.scrollMetadata;
+
+        // Clear image cache tracking so images are re-sent
+        // (viewport resize might reveal new images or change image positions)
+        console.log(`[Server] Clearing sentImageData cache (${this.sentImageData.size} entries) to re-send images after resize`);
+        this.sentImageData.clear();
+
+        // Send full update with new viewport
+        const diff = diffPrimitives(this.currentFrame, newFrame);
+        console.log(`[Server] Resize Diff: +${diff.added.length} -${diff.removed.length} ~${diff.changed.length} =${diff.unchanged.length}`);
+
+        const previousFrame = this.currentFrame;
+        this.currentFrame = newFrame;
+        await this.sendFrameBatched(diff.added, diff.changed, diff.removed, previousFrame);
+
+        // Trigger image sending for the new frame
+        await this.sendImageDataAsync(newFrame, previousFrame || []);
       }
     }
   }
 
-  private async sendFrame(
+  /**
+   * Send frame update - images are sent separately via ImageData messages
+   */
+  private async sendFrameBatched(
+    added: PrimitiveWithIdentity[],
+    changed: PrimitiveWithIdentity[],
+    removed: PrimitiveWithIdentity[],
+    previousFrame?: PrimitiveWithIdentity[]
+  ) {
+    // No batching needed - images sent via ImageData messages
+    await this.sendFrameInternal(added, changed, removed, previousFrame);
+  }
+
+  private async sendFrameInternal(
     added: PrimitiveWithIdentity[],
     changed: PrimitiveWithIdentity[],
     removed: PrimitiveWithIdentity[],
@@ -449,6 +620,70 @@ export class LiveSession {
     }
 
     this.ws.send(bytes);
+
+    // NEW: Send image data separately (async, no ack)
+    this.sendImageDataAsync(added, changed);
+  }
+
+  /**
+   * Send ImageData messages for images with pictBytes
+   * These are sent asynchronously without waiting for acks
+   */
+  private async sendImageDataAsync(added: PrimitiveWithIdentity[], changed: PrimitiveWithIdentity[]) {
+    const allPrimitives = [...added, ...changed];
+
+    console.log(`[Server] sendImageDataAsync: checking ${allPrimitives.length} primitives`);
+
+    const imagePrimitives = allPrimitives.filter(p =>
+      p.type === PrimitiveType.DrawImage &&
+      (p as any).pictBytes &&
+      (p as any).pictBytes.length > 0 &&
+      (p as any).src
+    );
+
+    if (imagePrimitives.length === 0) {
+      console.log(`[Server] No images with pictBytes to send`);
+      return;
+    }
+
+    console.log(`[Server] Sending ${imagePrimitives.length} images via ImageData messages`);
+
+    // Send images with small delays to avoid overwhelming the client
+    for (const prim of imagePrimitives) {
+      const src = (prim as any).src;
+      const pictBytes = (prim as any).pictBytes;
+
+      if (!src || typeof src !== 'string') {
+        console.error(`[Server] Invalid src for image:`, src);
+        continue;
+      }
+
+      const imageId = crypto.createHash('sha256').update(src).digest('hex').substring(0, 16);
+
+      // Skip if already sent
+      if (this.sentImageData.has(imageId)) {
+        console.log(`[Server] Skipping already-sent image ${imageId}`);
+        continue;
+      }
+
+      const imageData: any = {
+        messageType: 'ImageData',
+        imageId,
+        pictBytes,
+      };
+
+      console.log(`[Server] Serializing ImageData: id=${imageId} pictBytes=${pictBytes.length} bytes`);
+
+      const { bytes } = serializeImageData(imageData);
+
+      console.log(`[Server] Sending ImageData: id=${imageId} totalSize=${bytes.length} bytes`);
+
+      this.ws.send(bytes);
+      this.sentImageData.add(imageId);
+
+      // Small delay between images to avoid flooding client
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
   }
 
   handleAck(ackBytes: Buffer) {
@@ -529,18 +764,31 @@ if (process.env.NODE_ENV !== 'test') {
       if (messageType === 3) { // Init
         const urlLen = data.readUInt16LE(1);
         const url = data.toString('utf-8', 3, 3 + urlLen);
-        console.log(`[Server] Binary Init request for URL: ${url}`);
+
+        // Check if viewport dimensions are included (new format)
+        let viewportWidth = 1024;   // Default fallback
+        let viewportHeight = 768;   // Default fallback
+        const offset = 3 + urlLen;
+        if (data.length >= offset + 4) {
+          viewportWidth = data.readUInt16LE(offset);
+          viewportHeight = data.readUInt16LE(offset + 2);
+          console.log(`[Server] Binary Init request for URL: ${url} with viewport: ${viewportWidth}x${viewportHeight}`);
+        } else {
+          console.log(`[Server] Binary Init request for URL: ${url} (using default viewport 1024x768)`);
+        }
+
         session = new LiveSession(ws);
-        await session.init(url);
+        await session.init(url, viewportWidth, viewportHeight);
       } else if (messageType === 2) { // Ack
         if (session) {
           session.handleAck(data);
         }
       } else if (messageType === 4) { // Scroll
         if (session) {
-          const scrollY = data.readInt32LE(1);
-          const scrollSeq = data.readUInt32LE(5);  // Read sequence number
-          session.handleClientEvent({ type: 'scroll', scrollY, scrollSeq });
+          const scrollX = data.readInt32LE(1);
+          const scrollY = data.readInt32LE(5);
+          const scrollSeq = data.readUInt32LE(9);  // Read sequence number
+          session.handleClientEvent({ type: 'scroll', scrollX, scrollY, scrollSeq });
         }
       } else if (messageType === 5) { // Stats request
         if (session) {
@@ -575,6 +823,13 @@ if (process.env.NODE_ENV !== 'test') {
       } else if (messageType === 11) { // MouseLeave
         if (session) {
           session.handleClientEvent({ type: 'mouseLeave' });
+        }
+      } else if (messageType === 13) { // ResizeViewport
+        if (session) {
+          const width = data.readUInt16LE(1);
+          const height = data.readUInt16LE(3);
+          console.log(`[Server] Binary ResizeViewport request: ${width}x${height}`);
+          session.handleClientEvent({ type: 'resize', width, height });
         }
       }
     });

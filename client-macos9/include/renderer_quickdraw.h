@@ -22,13 +22,24 @@ public:
 
     bool isValid() const { return window_ != NULL && gWorld_ != NULL; }
     WindowRef getWindow() const { return window_; }
+    ControlRef getVerticalScrollBar() const { return vScrollBar_; }
+    ControlRef getHorizontalScrollBar() const { return hScrollBar_; }
 
     void renderFrame(PrimitiveStore& store);
-    void renderDiff(const FrameUpdate& update, PrimitiveStore& store);  // Differential rendering - only draws what changed!
     void smartScroll(int newScrollY, PrimitiveStore& store);  // CopyBits + render new strip only!
     void setScrollY(int scrollY) { scrollY_ = scrollY; }
+    void setScrollX(int scrollX) { scrollX_ = scrollX; }
     int getScrollY() const { return scrollY_; }
+    int getScrollX() const { return scrollX_; }
     int getViewportHeight() const { return height_ - ADDRESS_BAR_HEIGHT; }
+
+    // Scrollbar management
+    void updateScrollBarsWithDocumentSize(int docWidth, int docHeight, int viewportWidth, int viewportHeight);
+
+    // Window resize handling
+    bool handleResize(int newWidth, int newHeight);
+    int getWidth() const { return width_; }
+    int getHeight() const { return height_; }
 
     // Direct drawing helper utilities
     void clearScreen();
@@ -60,10 +71,14 @@ public:
 private:
     WindowRef window_;
     GWorldPtr gWorld_;
+    ControlRef vScrollBar_;  // Vertical scrollbar control
+    ControlRef hScrollBar_;  // Horizontal scrollbar control
     int width_;
     int height_;
     int scrollY_;
+    int scrollX_;
     int lastRenderedScrollY_;  // Track scroll position of last render
+    int lastRenderedScrollX_;  // Track horizontal scroll position of last render
     int lastTextY_;
     int lastPenX_;
     int lastChromiumEnd_;
@@ -74,6 +89,10 @@ private:
     std::string addressBarText_;
     bool addressBarFocused_;
     unsigned long lastFocusBlinkTicks_;
+
+    // Scrollbar management (private)
+    void updateScrollBars();
+    void createScrollBars();
 };
 
 } // namespace mochila

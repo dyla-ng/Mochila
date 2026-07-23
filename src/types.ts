@@ -43,6 +43,8 @@ export interface DrawTextPrimitive {
   type: PrimitiveType.DrawText;
   x: number;
   y: number;
+  width: number;          // DOMSnapshot bounding box width
+  height: number;         // DOMSnapshot bounding box height
   text: string;
   fontId: number;         // Mac OS 9 font ID from substitution table
   fontSize: number;

@@ -18,41 +18,155 @@ static std::string utf8ToMacRoman(const std::string &input) {
     } else if ((c & 0xE0) == 0xC0 && i + 1 < input.length()) { // 2-byte UTF-8
       unsigned char c2 = (unsigned char)input[i + 1];
       uint32_t code = ((c & 0x1F) << 6) | (c2 & 0x3F);
-      if (code == 0xA0)
-        out.push_back(' '); // Non-breaking space
-      else if (code == 0xA7)
-        out.push_back(0xA4); // Section symbol §
-      else if (code == 0xA9)
-        out.push_back(0xA9); // Copyright ©
-      else if (code == 0xAE)
-        out.push_back(0xA8); // Registered ®
-      else if (code >= 0xC0 && code <= 0xFF)
-        out.push_back(c); // Latin-1 fallback
+
+      // Comprehensive Latin-1 Supplement mappings (0x00A0-0x00FF)
+      if (code == 0x00A0) out.push_back(0xCA); // Non-breaking space
+      else if (code == 0x00A1) out.push_back(0xC1); // ¡
+      else if (code == 0x00A2) out.push_back(0xA2); // ¢
+      else if (code == 0x00A3) out.push_back(0xA3); // £
+      else if (code == 0x00A5) out.push_back(0xB4); // ¥
+      else if (code == 0x00A7) out.push_back(0xA4); // §
+      else if (code == 0x00A8) out.push_back(0xAC); // ¨
+      else if (code == 0x00A9) out.push_back(0xA9); // ©
+      else if (code == 0x00AA) out.push_back(0xBB); // ª
+      else if (code == 0x00AB) out.push_back(0xC7); // «
+      else if (code == 0x00AC) out.push_back(0xC2); // ¬
+      else if (code == 0x00AE) out.push_back(0xA8); // ®
+      else if (code == 0x00AF) out.push_back(0xF8); // ¯
+      else if (code == 0x00B0) out.push_back(0xA1); // °
+      else if (code == 0x00B1) out.push_back(0xB1); // ±
+      else if (code == 0x00B4) out.push_back(0xAB); // ´
+      else if (code == 0x00B5) out.push_back(0xB5); // µ
+      else if (code == 0x00B6) out.push_back(0xA6); // ¶
+      else if (code == 0x00B7) out.push_back(0xE1); // ·
+      else if (code == 0x00B8) out.push_back(0xFC); // ¸
+      else if (code == 0x00BA) out.push_back(0xBC); // º
+      else if (code == 0x00BB) out.push_back(0xC8); // »
+      else if (code == 0x00BF) out.push_back(0xC0); // ¿
+      else if (code == 0x00C0) out.push_back(0xCB); // À
+      else if (code == 0x00C1) out.push_back(0xE7); // Á
+      else if (code == 0x00C2) out.push_back(0xE5); // Â
+      else if (code == 0x00C3) out.push_back(0xCC); // Ã
+      else if (code == 0x00C4) out.push_back(0x80); // Ä
+      else if (code == 0x00C5) out.push_back(0x81); // Å
+      else if (code == 0x00C6) out.push_back(0xAE); // Æ
+      else if (code == 0x00C7) out.push_back(0x82); // Ç
+      else if (code == 0x00C8) out.push_back(0xE9); // È
+      else if (code == 0x00C9) out.push_back(0x83); // É
+      else if (code == 0x00CA) out.push_back(0xE6); // Ê
+      else if (code == 0x00CB) out.push_back(0xE8); // Ë
+      else if (code == 0x00CC) out.push_back(0xED); // Ì
+      else if (code == 0x00CD) out.push_back(0xEA); // Í
+      else if (code == 0x00CE) out.push_back(0xEB); // Î
+      else if (code == 0x00CF) out.push_back(0xEC); // Ï
+      else if (code == 0x00D1) out.push_back(0x84); // Ñ
+      else if (code == 0x00D2) out.push_back(0xF1); // Ò
+      else if (code == 0x00D3) out.push_back(0xEE); // Ó
+      else if (code == 0x00D4) out.push_back(0xEF); // Ô
+      else if (code == 0x00D5) out.push_back(0xCD); // Õ
+      else if (code == 0x00D6) out.push_back(0x85); // Ö
+      else if (code == 0x00D8) out.push_back(0xAF); // Ø
+      else if (code == 0x00D9) out.push_back(0xF4); // Ù
+      else if (code == 0x00DA) out.push_back(0xF2); // Ú
+      else if (code == 0x00DB) out.push_back(0xF3); // Û
+      else if (code == 0x00DC) out.push_back(0x86); // Ü
+      else if (code == 0x00DF) out.push_back(0xA7); // ß
+      else if (code == 0x00E0) out.push_back(0x88); // à
+      else if (code == 0x00E1) out.push_back(0x87); // á
+      else if (code == 0x00E2) out.push_back(0x89); // â
+      else if (code == 0x00E3) out.push_back(0x8B); // ã
+      else if (code == 0x00E4) out.push_back(0x8A); // ä
+      else if (code == 0x00E5) out.push_back(0x8C); // å
+      else if (code == 0x00E6) out.push_back(0xBE); // æ
+      else if (code == 0x00E7) out.push_back(0x8D); // ç
+      else if (code == 0x00E8) out.push_back(0x8F); // è
+      else if (code == 0x00E9) out.push_back(0x8E); // é
+      else if (code == 0x00EA) out.push_back(0x90); // ê
+      else if (code == 0x00EB) out.push_back(0x91); // ë
+      else if (code == 0x00EC) out.push_back(0x93); // ì
+      else if (code == 0x00ED) out.push_back(0x92); // í
+      else if (code == 0x00EE) out.push_back(0x94); // î
+      else if (code == 0x00EF) out.push_back(0x95); // ï
+      else if (code == 0x00F1) out.push_back(0x96); // ñ
+      else if (code == 0x00F2) out.push_back(0x98); // ò
+      else if (code == 0x00F3) out.push_back(0x97); // ó
+      else if (code == 0x00F4) out.push_back(0x99); // ô
+      else if (code == 0x00F5) out.push_back(0x9B); // õ
+      else if (code == 0x00F6) out.push_back(0x9A); // ö
+      else if (code == 0x00F7) out.push_back(0xD6); // ÷
+      else if (code == 0x00F8) out.push_back(0xBF); // ø
+      else if (code == 0x00F9) out.push_back(0x9D); // ù
+      else if (code == 0x00FA) out.push_back(0x9C); // ú
+      else if (code == 0x00FB) out.push_back(0x9E); // û
+      else if (code == 0x00FC) out.push_back(0x9F); // ü
+      else if (code == 0x00FF) out.push_back(0xD8); // ÿ
+      // Latin Extended-A
+      else if (code == 0x0131) out.push_back(0xF5); // ı
+      else if (code == 0x0152) out.push_back(0xCE); // Œ
+      else if (code == 0x0153) out.push_back(0xCF); // œ
+      else if (code == 0x0178) out.push_back(0xD9); // Ÿ
+      // Latin Extended-B
+      else if (code == 0x0192) out.push_back(0xC4); // ƒ
+      // Spacing Modifier Letters
+      else if (code == 0x02C6) out.push_back(0xF6); // ˆ
+      else if (code == 0x02C7) out.push_back(0xFF); // ˇ
+      else if (code == 0x02D8) out.push_back(0xF9); // ˘
+      else if (code == 0x02D9) out.push_back(0xFA); // ˙
+      else if (code == 0x02DA) out.push_back(0xFB); // ˚
+      else if (code == 0x02DB) out.push_back(0xFE); // ˛
+      else if (code == 0x02DC) out.push_back(0xF7); // ˜
+      else if (code == 0x02DD) out.push_back(0xFD); // ˝
       else
-        out.push_back(' ');
+        out.push_back('?'); // Unmappable 2-byte character
       i += 2;
     } else if ((c & 0xF0) == 0xE0 && i + 2 < input.length()) { // 3-byte UTF-8
       unsigned char c2 = (unsigned char)input[i + 1];
       unsigned char c3 = (unsigned char)input[i + 2];
       uint32_t code = ((c & 0x0F) << 12) | ((c2 & 0x3F) << 6) | (c3 & 0x3F);
 
-      if (code == 0x2018 || code == 0x2019)
-        out.push_back(0xD5); // Single quotes ‘ ’ -> Mac Roman ’
-      else if (code == 0x201C || code == 0x201D)
-        out.push_back(0xD2); // Double quotes “ ” -> Mac Roman “
-      else if (code == 0x2013)
-        out.push_back(0xD6); // En-dash –
-      else if (code == 0x2014)
-        out.push_back(0xD7); // Em-dash —
-      else if (code == 0x2022)
-        out.push_back(0xA5); // Bullet •
-      else if (code == 0x2026)
-        out.push_back(0xC9); // Ellipsis …
+      // Greek and Coptic
+      if (code == 0x03A9) out.push_back(0xBD); // Ω
+      else if (code == 0x03C0) out.push_back(0xB9); // π
+      // General Punctuation
+      else if (code == 0x2013) out.push_back(0xD0); // –
+      else if (code == 0x2014) out.push_back(0xD1); // —
+      else if (code == 0x2018) out.push_back(0xD4); // '
+      else if (code == 0x2019) out.push_back(0xD5); // '
+      else if (code == 0x201A) out.push_back(0xE2); // ‚
+      else if (code == 0x201C) out.push_back(0xD2); // "
+      else if (code == 0x201D) out.push_back(0xD3); // "
+      else if (code == 0x201E) out.push_back(0xE3); // „
+      else if (code == 0x2020) out.push_back(0xA0); // †
+      else if (code == 0x2021) out.push_back(0xE0); // ‡
+      else if (code == 0x2022) out.push_back(0xA5); // • (bullet)
+      else if (code == 0x2026) out.push_back(0xC9); // …
+      else if (code == 0x2030) out.push_back(0xE4); // ‰
+      else if (code == 0x2039) out.push_back(0xDC); // ‹
+      else if (code == 0x203A) out.push_back(0xDD); // ›
+      else if (code == 0x2044) out.push_back(0xDA); // ⁄
+      // Currency Symbols
+      else if (code == 0x20AC) out.push_back(0xDB); // €
+      // Mathematical Operators
+      else if (code == 0x2202) out.push_back(0xB6); // ∂
+      else if (code == 0x2206) out.push_back(0xC6); // ∆
+      else if (code == 0x220F) out.push_back(0xB8); // ∏
+      else if (code == 0x2211) out.push_back(0xB7); // ∑
+      else if (code == 0x221A) out.push_back(0xC3); // √
+      else if (code == 0x221E) out.push_back(0xB0); // ∞
+      else if (code == 0x222B) out.push_back(0xBA); // ∫
+      else if (code == 0x2248) out.push_back(0xC5); // ≈
+      else if (code == 0x2260) out.push_back(0xAD); // ≠
+      else if (code == 0x2264) out.push_back(0xB2); // ≤
+      else if (code == 0x2265) out.push_back(0xB3); // ≥
+      else if (code == 0x25CA) out.push_back(0xD7); // ◊
+      // Alphabetic Presentation Forms
+      else if (code == 0xFB01) out.push_back(0xDE); // ﬁ
+      else if (code == 0xFB02) out.push_back(0xDF); // ﬂ
       else
-        out.push_back(' ');
+        out.push_back('?'); // Unmappable 3-byte character
       i += 3;
     } else {
-      out.push_back(' ');
+      out.push_back('?'); // Use ? for invalid/unmappable sequences
       i++;
     }
   }
@@ -91,6 +205,74 @@ static void writeUInt32LE(uint8_t *p, uint32_t val) {
   p[1] = (val >> 8) & 0xFF;
   p[2] = (val >> 16) & 0xFF;
   p[3] = (val >> 24) & 0xFF;
+}
+
+uint8_t WireProtocol::peekMessageType(const std::vector<uint8_t> &bytes) {
+  if (bytes.size() < 1) {
+    return 0;
+  }
+  return bytes[0];
+}
+
+ImageData WireProtocol::parseImageData(const std::vector<uint8_t> &bytes) {
+  ImageData data;
+  size_t offset = 0;
+
+  std::cout << "[WireProtocol] Parsing ImageData: bufferSize=" << bytes.size() << std::endl;
+
+  // Read message type (should be 12)
+  if (offset + 1 > bytes.size()) {
+    std::cerr << "[WireProtocol] Buffer too small for messageType" << std::endl;
+    return data;
+  }
+  uint8_t messageType = bytes[offset];
+  offset += 1;
+
+  if (messageType != 12) {
+    std::cerr << "[WireProtocol] Invalid ImageData message type: "
+              << static_cast<int>(messageType) << " (expected 12)" << std::endl;
+    return data;
+  }
+
+  // Read imageId length (uint16 LE)
+  if (offset + 2 > bytes.size()) {
+    std::cerr << "[WireProtocol] Buffer too small for imageIdLen" << std::endl;
+    return data;
+  }
+  uint16_t imageIdLen = readUInt16LE(&bytes[offset]);
+  offset += 2;
+
+  std::cout << "[WireProtocol] imageIdLen=" << imageIdLen << " offset=" << offset << std::endl;
+
+  // Read imageId string
+  if (offset + imageIdLen > bytes.size()) {
+    std::cerr << "[WireProtocol] ImageId extends beyond buffer: offset=" << offset
+              << " imageIdLen=" << imageIdLen << " bufferSize=" << bytes.size() << std::endl;
+    return data;
+  }
+  data.imageId = std::string(bytes.begin() + offset, bytes.begin() + offset + imageIdLen);
+  offset += imageIdLen;
+
+  // Read pictBytes length (uint32 LE)
+  if (offset + 4 > bytes.size()) {
+    std::cerr << "[WireProtocol] Buffer too small for pictLen" << std::endl;
+    return data;
+  }
+  uint32_t pictLen = readUInt32LE(&bytes[offset]);
+  offset += 4;
+
+  // Read pictBytes
+  if (offset + pictLen > bytes.size()) {
+    std::cerr << "[WireProtocol] PictBytes extend beyond buffer" << std::endl;
+    return data;
+  }
+  data.pictBytes.assign(bytes.begin() + offset, bytes.begin() + offset + pictLen);
+  offset += pictLen;
+
+  std::cout << "[WireProtocol] Parsed ImageData: id=" << data.imageId
+            << " pictBytes=" << data.pictBytes.size() << " bytes" << std::endl;
+
+  return data;
 }
 
 FrameUpdate WireProtocol::parseFrameUpdate(const std::vector<uint8_t> &bytes) {
@@ -240,10 +422,10 @@ FrameUpdate WireProtocol::parseFrameUpdate(const std::vector<uint8_t> &bytes) {
       prim->type = PrimitiveType_DrawText;
       prim->identity = identity;
 
-      if (offset + 12 > bytes.size()) {
+      if (offset + 16 > bytes.size()) {  // Updated: need 16 bytes (x, y, width, height, fontId, fontSize, rgba)
         if (i < 3)
           std::cerr << "[WireProtocol] DrawText at index " << i
-                    << ": not enough bytes for header (need 12, have "
+                    << ": not enough bytes for header (need 16, have "
                     << (bytes.size() - offset) << ")" << std::endl;
         delete prim;
         break;
@@ -252,6 +434,10 @@ FrameUpdate WireProtocol::parseFrameUpdate(const std::vector<uint8_t> &bytes) {
       offset += 4;
       prim->y = readInt32LE(&bytes[offset]);
       offset += 4;
+      prim->width = readUInt16LE(&bytes[offset]);
+      offset += 2;
+      prim->height = readUInt16LE(&bytes[offset]);
+      offset += 2;
       prim->fontId = readUInt16LE(&bytes[offset]);
       offset += 2;
       prim->fontSize = readUInt16LE(&bytes[offset]);
@@ -364,7 +550,7 @@ FrameUpdate WireProtocol::parseFrameUpdate(const std::vector<uint8_t> &bytes) {
       prim->type = PrimitiveType_DrawImage;
       prim->identity = identity;
 
-      if (offset + 16 > bytes.size()) {
+      if (offset + 12 > bytes.size()) {
         delete prim;
         break;
       }
@@ -376,6 +562,29 @@ FrameUpdate WireProtocol::parseFrameUpdate(const std::vector<uint8_t> &bytes) {
       offset += 2;
       prim->height = readUInt16LE(&bytes[offset]);
       offset += 2;
+
+      // Read imageId length and string
+      if (offset + 2 > bytes.size()) {
+        delete prim;
+        break;
+      }
+      uint16_t imageIdLen = readUInt16LE(&bytes[offset]);
+      offset += 2;
+
+      if (imageIdLen > 0) {
+        if (offset + imageIdLen > bytes.size()) {
+          delete prim;
+          break;
+        }
+        prim->imageId = std::string(bytes.begin() + offset, bytes.begin() + offset + imageIdLen);
+        offset += imageIdLen;
+      }
+
+      // Read pictBytes length (will be 0 - images come via ImageData)
+      if (offset + 4 > bytes.size()) {
+        delete prim;
+        break;
+      }
       uint32_t imageLen = readUInt32LE(&bytes[offset]);
       offset += 4;
 
@@ -462,30 +671,56 @@ FrameUpdate WireProtocol::parseFrameUpdate(const std::vector<uint8_t> &bytes) {
   std::cout << "[WireProtocol] Successfully parsed " << frame.primitives.size()
             << " / " << primitiveCount << " primitives" << std::endl;
 
-  // Parse optional scrollMetadata (scrollY)
+  // Parse optional scrollMetadata (scrollY and scrollX)
   if (offset < bytes.size()) {
     uint8_t hasScrollMetadata = bytes[offset++];
+    frame.hasScrollMetadata = (hasScrollMetadata == 1);
     if (hasScrollMetadata) {
       // Read scrollY
       if (offset + 4 <= bytes.size()) {
         frame.scrollY = (int32_t)readUInt32LE(&bytes[offset]);
         offset += 4;
-        std::cout << "[WireProtocol] Parsed scrollY=" << frame.scrollY << std::endl;
       }
 
-      // Skip remaining scrollMetadata fields (scrollX, viewportWidth, viewportHeight, documentWidth, documentHeight)
-      offset += 4 + 2 + 2 + 2 + 2;  // scrollX (4) + viewport dims (2+2) + document dims (2+2)
+      // Read scrollX
+      if (offset + 4 <= bytes.size()) {
+        frame.scrollX = (int32_t)readUInt32LE(&bytes[offset]);
+        offset += 4;
+      }
+
+      // Read viewport and document dimensions
+      if (offset + 2 <= bytes.size()) {
+        frame.viewportWidth = readUInt16LE(&bytes[offset]);
+        offset += 2;
+      }
+      if (offset + 2 <= bytes.size()) {
+        frame.viewportHeight = readUInt16LE(&bytes[offset]);
+        offset += 2;
+      }
+      if (offset + 2 <= bytes.size()) {
+        frame.documentWidth = readUInt16LE(&bytes[offset]);
+        offset += 2;
+      }
+      if (offset + 2 <= bytes.size()) {
+        frame.documentHeight = readUInt16LE(&bytes[offset]);
+        offset += 2;
+      }
+
+      std::cout << "[WireProtocol] Parsed scroll metadata: pos=(" << frame.scrollX << "," << frame.scrollY
+                << ") viewport=" << frame.viewportWidth << "x" << frame.viewportHeight
+                << " document=" << frame.documentWidth << "x" << frame.documentHeight << std::endl;
 
       // Skip stickyElements array
       if (offset + 2 <= bytes.size()) {
         uint16_t stickyCount = readUInt16LE(&bytes[offset]);
         offset += 2;
         for (int i = 0; i < stickyCount && offset < bytes.size(); i++) {
-          if (offset + 2 > bytes.size()) break;
+          if (offset + 2 > bytes.size())
+            break;
           uint16_t posLen = readUInt16LE(&bytes[offset]);
           offset += 2;
-          offset += posLen;  // Skip position string
-          offset += 4 + 4 + 2 + 2;  // x, y, width, height
+          offset += posLen;        // Skip position string
+          offset += 4 + 4 + 2 + 2; // x, y, width, height
         }
       }
     }
@@ -498,10 +733,12 @@ FrameUpdate WireProtocol::parseFrameUpdate(const std::vector<uint8_t> &bytes) {
       uint16_t urlLen = readUInt16LE(&bytes[offset]);
       offset += 2;
       if (urlLen > 0 && offset + urlLen <= bytes.size()) {
-        frame.currentUrl.assign(reinterpret_cast<const char*>(&bytes[offset]), urlLen);
+        frame.currentUrl.assign(reinterpret_cast<const char *>(&bytes[offset]),
+                                urlLen);
         frame.hasCurrentUrl = true;
         offset += urlLen;
-        std::cout << "[WireProtocol] Parsed currentUrl=" << frame.currentUrl << std::endl;
+        std::cout << "[WireProtocol] Parsed currentUrl=" << frame.currentUrl
+                  << std::endl;
       }
     }
   }
@@ -513,7 +750,8 @@ FrameUpdate WireProtocol::parseFrameUpdate(const std::vector<uint8_t> &bytes) {
       frame.lastProcessedScrollSeq = readUInt32LE(&bytes[offset]);
       frame.hasLastProcessedScrollSeq = true;
       offset += 4;
-      std::cout << "[WireProtocol] Parsed lastProcessedScrollSeq=" << frame.lastProcessedScrollSeq << std::endl;
+      std::cout << "[WireProtocol] Parsed lastProcessedScrollSeq="
+                << frame.lastProcessedScrollSeq << std::endl;
     }
   }
 
@@ -535,11 +773,14 @@ std::vector<uint8_t> WireProtocol::serializeClick(int32_t x, int32_t y) {
   return result;
 }
 
-std::vector<uint8_t> WireProtocol::serializeScroll(int32_t scrollY, uint32_t sequenceNumber) {
-  std::vector<uint8_t> result(9);  // 1 + 4 + 4 bytes
-  result[0] = 4; // MessageType 4 (Scroll)
-  writeUInt32LE(&result[1], (uint32_t)scrollY);
-  writeUInt32LE(&result[5], sequenceNumber);
+std::vector<uint8_t> WireProtocol::serializeScroll(int32_t scrollX,
+                                                   int32_t scrollY,
+                                                   uint32_t sequenceNumber) {
+  std::vector<uint8_t> result(13); // 1 + 4 + 4 + 4 bytes
+  result[0] = 4;                   // MessageType 4 (Scroll)
+  writeUInt32LE(&result[1], (uint32_t)scrollX);
+  writeUInt32LE(&result[5], (uint32_t)scrollY);
+  writeUInt32LE(&result[9], sequenceNumber);
   return result;
 }
 
@@ -582,6 +823,14 @@ std::vector<uint8_t> WireProtocol::serializeMouseEnter(int32_t x, int32_t y) {
 std::vector<uint8_t> WireProtocol::serializeMouseLeave() {
   std::vector<uint8_t> result;
   result.push_back(11); // MessageType 11 (MouseLeave)
+  return result;
+}
+
+std::vector<uint8_t> WireProtocol::serializeResizeViewport(uint16_t width, uint16_t height) {
+  std::vector<uint8_t> result(5); // 1 + 2 + 2 bytes
+  result[0] = 13; // MessageType 13 (ResizeViewport)
+  writeUInt16LE(&result[1], width);
+  writeUInt16LE(&result[3], height);
   return result;
 }
 
